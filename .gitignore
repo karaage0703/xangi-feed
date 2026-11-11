@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.xangi-feed/
+.env
+.pytest_cache/
+catalog.local.json
+
+# Site-specific implementations/registry/tests stay on this machine.
+xangi_feed/adapters/*.py
+!xangi_feed/adapters/__init__.py
+!xangi_feed/adapters/html.py
+tests/test_pages.py
+tests/local/
+reports/
+
+# Per-user saving skills; publish only the starter skill.
+skills-local/

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "d1816926d309dc14",
+      "name": "karaage. [からあげ]",
+      "url": "https://karaage.hatenadiary.jp/rss",
+      "kind": "blog",
+      "adapter": "rss",
+      "consumers": [
+        "feed"
+      ]
+    },
+    {
+      "id": "0f877341fe26ece9",
+      "name": "からあげ帝国放送局",
+      "url": "https://anchor.fm/s/10dc03768/podcast/rss",
+      "kind": "podcast",
+      "adapter": "rss",
+      "consumers": [
+        "feed"
+      ]
+    },
+    {
+      "id": "1776bc1122489df8",
+      "name": "からあげのYouTube",
+      "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC2FjqK_WjVRYyj4lYwmEdKQ",
+      "kind": "video",
+      "adapter": "rss",
+      "consumers": [
+        "feed"
+      ]
+    }
+  ]
+}
