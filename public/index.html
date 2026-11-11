@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>xangi-feed</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+  <script type="module" src="bookmarklet-settings.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><a href="/" id="home" class="home-link" hidden aria-label="xangiホーム"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m3 10 9-7 9 7v10H15v-7H9v7H3z"/></svg><span>xangiホーム</span></a><h1>xangi-feed</h1></div>
+    <div class="header-preferences"><button id="settings-open">設定</button><label class="theme-select"><span class="sr-only">表示テーマ</span><select id="theme-select" aria-label="表示テーマ"><option value="system">端末設定</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label></div>
+  </header>
+  <div class="feed-actions"><span id="sync-status">読み込み中</span><div><button id="refresh" aria-label="今すぐ取得" title="今すぐ取得">今すぐ取得</button><button id="article-open">記事を追加</button></div></div>
+  <div class="reading-layout">
+    <aside id="classification" aria-label="分類で絞り込む"><h2>分類</h2><div id="classification-controls">
+      <section><h3>種類</h3><p class="muted">複数選択すると、いずれかの種類を表示します。</p><select id="kind" hidden><option value="">すべての種類</option><option value="tech">テック</option><option value="blog">ブログ</option><option value="podcast">Podcast</option><option value="paper">論文</option><option value="video">YouTube</option><option value="news">ニュース</option><option value="comic">漫画</option><option value="rss">その他の記事</option></select><nav id="kind-choices" aria-label="記事の種類"></nav></section>
+      <section><h3>話題タグ</h3><p class="muted">複数選択すると、いずれかを含む記事を表示します。</p><div id="topic-choices" aria-label="話題タグ"></div></section>
+      <section><h3>自分のタグ</h3><div id="manual-tag-choices" aria-label="自分のタグで絞り込む"></div><details id="tag-management"><summary>タグの管理</summary><p class="muted">削除するとすべての記事からタグを外します。記事は残ります。</p><div id="tag-management-list"></div><p id="tag-management-message" role="status"></p></details></section>
+      <section><h3>配信元</h3><label for="source-search" class="sr-only">配信元を検索</label><input id="source-search" type="search" placeholder="配信元名で探す" maxlength="100"><label for="source" class="sr-only">配信元を選ぶ</label><select id="source" size="7"><option value="">すべての配信元</option></select><p id="source-match" class="muted" role="status"></p></section>
+    </div></aside>
+  <div id="resize-classification" role="separator" tabindex="0" aria-label="分類パネルの幅" aria-orientation="vertical" aria-controls="classification" title="ドラッグまたは左右キーで幅調整。ダブルクリックで初期幅に戻す"></div>
+  <main class="shell">
+    <nav class="tabs" aria-label="ニュースの表示">
+      <button data-tab="recommended" aria-pressed="true">カスタム</button><button data-tab="discovery" aria-pressed="false">おすすめ</button><button data-tab="all" aria-pressed="false">すべて</button><button data-tab="manual" aria-pressed="false">個別追加</button><button data-tab="saved" aria-pressed="false">ブックマーク</button><button data-tab="notes" aria-pressed="false">メモ</button><button data-tab="read" aria-pressed="false">読了</button><button data-tab="discussed" aria-pressed="false">議論した記事</button><button data-tab="muted" aria-pressed="false">ミュート</button>
+    </nav>
+    <p id="view-description" class="muted">Good／Badによる好みや新しさで並べ替えられます。</p>
+    <div class="filters"><button id="classification-open" aria-haspopup="dialog">分類で絞り込む</button><label class="search-label"><span class="sr-only">記事を検索</span><input id="search" type="search" placeholder="気になるキーワードで探す" maxlength="200"></label></div>
+    <div id="active-filters" aria-label="選択中の絞り込み"></div>
+    <section id="recommendation-panel" class="recommendation-panel" aria-labelledby="recommendation-title">
+    <form id="recommendation-form"><fieldset id="recommendation-fields" disabled>
+      <details id="recommendation-toggle"><summary id="recommendation-title">カスタム条件</summary>
+      <label>好みの下限（点以上）<input name="recommendation_min_preference" type="number" min="-100" max="100" step="1" placeholder="指定なし"></label>
+      <p class="muted">空欄は絞り込みなし。指定すると未評価の記事は除外します。並び順に関係なく適用します。</p>
+      <div class="recommendation-quick"><label>好み・新しさ順の優先<select name="recommendation_priority"><option value="balanced">バランス</option><option value="fresh">新しさ</option><option value="interest">好み（Good／Bad）</option></select></label></div>
+      <div id="recommendation-advanced">
+      <label>表示期間（日）<input name="recommendation_days" type="number" min="0" max="365" required></label>
+      <p class="muted">0は全期間。公開日が不明な記事は初回取得日で判断します。</p>
+      <label class="check-label"><input name="recommendation_hide_bad" type="checkbox">Badを付けた記事を隠す</label>
+      <label class="check-label"><input name="recommendation_mix_types" type="checkbox">好み・新しさ順では種類を交互に表示する</label>
+      <p class="muted">「好み・新しさ順」を選んだときに種類ごとの優先順を適用します。他の並び順では交互にしません。条件変更だけで解説を再生成することはありません。</p>
+      </div></details></fieldset>
+      <p id="recommendation-message" class="muted" role="status">条件を読み込んでいます。</p><button id="recommendation-retry" type="button" hidden>もう一度試す</button></form></section>
+    <section id="discovery-panel" hidden aria-labelledby="discovery-title">
+      <h2 id="discovery-title">おすすめの記事</h2>
+      <p>Goodで育った好みをもとに公開Webを定期探索します。公開フィードで確認できた最近30日以内の記事を表示します。</p>
+      <form id="discovery-form"><fieldset id="discovery-fields" disabled><label class="check-label"><input name="discovery_enabled" type="checkbox">定期的に探す</label><label>探索間隔（時間）<input name="discovery_interval_hours" type="number" min="6" max="168" required value="24"></label><label class="discovery-prompt">検索のカスタムプロンプト<textarea name="discovery_prompt" rows="3" maxlength="2000" aria-describedby="discovery-prompt-help" placeholder="例：日本語の記事だけ。ローカルAIの実装例を優先し、広告・求人の記事は除く。"></textarea><span id="discovery-prompt-help" class="muted">自由な文章で検索語・言語・除外語・期間を指定できます。Good未登録でも検索できます。入力を止めると自動保存して検索します。同じ条件で検索し直すときは「今すぐ探す」を押してください。適用した条件は結果の上に表示します。</span></label><button id="discovery-refresh" type="submit">今すぐ探す</button></fieldset><p id="discovery-save-message" class="muted" role="status">設定を読み込んでいます。</p><button id="discovery-retry" type="button" hidden>保存を再試行</button></form>
+      <p class="muted">記事のタイトルを押すと原文が開きます。配信元の登録は必要ありません。</p>
+      <p id="discovery-message" role="status"></p>
+      <div id="discovery-results" aria-label="おすすめの新しい記事"></div>
+    </section>
+    <div class="list-info"><p id="result-count"></p><label class="sort-control">並び替え<select id="sort"><option value="manual_added_at" hidden>個別に追加した順（新しい順）</option><option value="read_at" hidden>読了に追加した順（新しい順）</option><option value="updated" selected>更新日が新しい順</option><option value="published">公開日が新しい順</option><option value="preference">好み順（Good／Bad）</option><option value="recommended">好み・新しさ順</option></select></label><button id="new-items" hidden></button></div>
+    <p id="notice" class="notice" role="status" hidden></p>
+    <section id="feed" aria-label="ニュース一覧" aria-busy="true"></section>
+    <button id="more" class="more" hidden>次の50件を表示</button>
+    <noscript><p>記事の表示と評価にはJavaScriptが必要です。</p></noscript>
+  </main>
+  </div>
+  <dialog id="classification-dialog" aria-labelledby="classification-title"><div class="dialog-toolbar"><h2 id="classification-title">分類で絞り込む</h2><button id="classification-close">一覧に戻る</button></div><div id="classification-mobile-slot"></div><button id="classification-done" class="primary">この条件で一覧を見る</button></dialog>
+  <dialog id="article-link" aria-labelledby="article-link-title"><div class="dialog-toolbar"><h2 id="article-link-title">リンクを共有・コピー</h2><button id="article-link-close">閉じる</button></div>
+    <p id="article-link-name"></p><p class="muted">原文は別タブ／ウィンドウで開きます。共有やコピーも使えます。</p>
+    <div class="article-link-actions"><a id="article-link-open" target="_blank" rel="noopener noreferrer">別ウィンドウで原文を開く</a><button id="article-link-share">リンクを共有</button><button id="article-link-copy">URLをコピー</button></div>
+    <label id="article-link-copy-fallback" hidden>コピーするURL<input id="article-link-url" readonly></label><p id="article-link-message" role="status"></p>
+  </dialog>
+  <dialog id="article-add"><div class="dialog-toolbar"><h2>記事を追加</h2><button id="article-close">閉じる</button></div>
+    <form id="article-form"><label>記事URL（必須）<input name="url" type="url" autofocus required maxlength="4000" placeholder="https://example.com/article"></label>
+      <label>タイトル（任意）<input name="title" maxlength="1000"></label>
+      <label>抜粋（任意）<textarea name="summary" rows="4" maxlength="5000"></textarea></label>
+      <p class="muted">この記事だけを追加し、公開ページのタイトルと本文を取得します。入力したタイトル・抜粋は優先します。YouTubeは動画情報と、設定がオンなら字幕または音声文字起こしを取得します。取得できない場合もURLを登録し、詳細から再取得できます。サイトは購読しません。</p>
+      <button type="submit" class="primary">追加して開く</button><p id="article-error" role="alert"></p>
+    </form>
+  </dialog>
+  <dialog id="detail"><div class="dialog-toolbar"><span>記事の詳細</span><button id="detail-close" aria-label="詳細を閉じる">閉じる</button></div><div id="detail-body"></div></dialog>
+  <dialog id="discussion"><div class="dialog-toolbar"><h2>xangiと話す</h2><button id="discussion-close">閉じる</button></div>
+    <p id="discussion-title"></p><form id="discussion-form">
+      <label>追記プロンプト（任意）<textarea name="prompt" maxlength="4000" rows="4" placeholder="このニュースを手元で試すなら何から始めればよい？"></textarea></label>
+      <label>エージェント（任意）<select name="agent_id"><option value="">xangiの既定</option></select></label>
+      <label class="check-label"><input name="new_conversation" type="checkbox">新しい会話を作成する</label>
+      <p class="muted" id="discussion-help">記事の文脈と追記を渡し、新しいタブで開きます。プロジェクトは指定せず作成します。</p>
+      <button type="submit" class="primary">議論を開く</button><p id="discussion-message" role="status"></p>
+    </form>
+  </dialog>
+  <dialog id="settings"><div class="dialog-toolbar"><h2>設定</h2><button id="settings-close">閉じる</button></div>
+    <section id="bookmarklet-settings"><h3>ブックマークレット</h3><p>記事のページからURLとタイトルを受け取り、追加・Notion保存を選べます。</p><a id="settings-bookmarklet" draggable="true">xangi-feedに送る</a><label>登録用コード<textarea id="settings-bookmarklet-code" rows="4" readonly spellcheck="false"></textarea></label><button id="settings-bookmarklet-copy" type="button">コードをコピー</button><p id="settings-bookmarklet-message" role="status"></p><p class="muted">PCではリンクをブックマークバーへドラッグ。iPhoneでは通常のブックマークを作り、URL欄をこのコードへ置き換えます。</p><a href="capture">詳しい登録手順・受け取り画面</a></section>
+    <section id="ios-link-settings" hidden><h3>iPhone PWAのリンク</h3><label class="check-label"><input id="ios-external-safari" type="checkbox">Safariアプリで開く</label><p class="muted">初期設定はOFFです。この端末でONにするとHTTPSの記事をSafariアプリへ渡します。iOSのバージョンによって起動しない場合は、OFFで通常リンクに戻せます。HTTPの記事は通常リンクで開きます。</p><p id="ios-link-status" role="status"></p></section>
+    <section><h3>リンクカード</h3><form id="preview-form"><label class="check-label"><input name="show_link_previews" type="checkbox" checked>リンク先の画像・タイトル・サイト名を表示する</label><p class="muted">初期設定はON。画面に近い記事からプレビューを取得します。画像がない場合は文字だけ表示します。</p><button type="submit">リンクカードの設定を保存</button><p id="preview-message" role="status"></p></form></section>
+    <section><h3>読了の動作</h3><form id="reading-form"><label class="check-label"><input name="mark_read_on_open" type="checkbox" checked>記事・動画・音声のリンクを開いたら読了にする</label><p class="muted">初期設定はON。OFFなら「読んだ／視聴済み」を選ぶまで未読のままです。記事詳細を見るだけ、共有・コピー、Notion保存では読了にしません。</p><button type="submit">読了の設定を保存</button><p id="reading-message" role="status"></p></form></section>
+    <section><h3>日本語の要点・AIコメント</h3><p class="muted">登録済みAIへ記事の抜粋とxangi-searchの関連記録を渡し、要点と推薦コメントを生成します。コメントは吹き出しで表示し、使った記録を確認できます。関連記録がない場合も取得状態を明示します。好みの点数はGood／Badで計算します。担当はこの画面で確認・変更できます。入力はフィードの本文・要旨で、全文・音声は未確認です。</p><form id="ai-form"><label>自動解説<select name="enabled"><option value="true">有効</option><option value="false">停止</option></select></label><label>エージェント<select name="agent_id" aria-describedby="agent-help agent-model" required></select></label><p id="agent-help" class="muted">xangi本体に登録したエージェントを、同じモデル・接続設定で使います。この拡張だけの設定です。</p><p id="agent-model" class="muted"></p><label>AIの待ち時間（秒）<input name="timeout_seconds" type="number" min="1" max="1800" required></label><label>取得1回あたりの自動解説件数<input name="automatic_limit" type="number" min="0" max="100"></label><p class="muted">一覧を表示すると先頭50件も解説待ちに追加します。自動件数0でもこの処理は残ります。停止中は新たにAIへ送りません。</p><button type="submit">解説の設定を保存</button><p id="ai-message" role="status"></p></form></section>
+    <section><h3>AIとスキルによるNotion保存</h3>
+      <p class="muted">保存ボタンを押すと担当AIへ依頼します。何をどこへ保存するかは、利用者ごとの保存スキルで決めます。結果や不足情報は保存用の会話で確認できます。</p>
+      <form id="save-form"><label>保存担当AI<select name="save_agent_id"><option value="">xangiの既定</option></select></label>
+      <label>保存スキル名<input name="save_skill_name" required maxlength="64" pattern="[a-z0-9][a-z0-9-]{0,63}" value="xangi-feed-save"></label>
+      <p class="muted">標準のxangi-feed-saveをコピーして、保存対象・保存先・形式を自分の方針へ変更できます。</p>
+      <button type="submit">保存担当とスキルを設定</button><p id="save-message" role="status"></p></form></section>
+    <section><h3>好みの集計</h3><div id="profile"></div><p class="muted">「好き」は似た話題を増やし、「興味なし」は減らします。重複・要約の問題は好みに反映しません。無反応や議論の有無は評価に使いません。</p><button id="reset">評価をリセット</button></section>
+    <section><h3>配信元</h3><p class="muted">起動中は30分ごとに取得。停止は取得を休止し、削除は配信元の登録を一覧から外します。どちらも取得済みの記事・評価・メモ・会話は残ります。</p><p id="source-message" role="status" tabindex="-1"></p><div id="sources"></div></section>
+    <section><h3>配信元を追加</h3><form id="source-form"><label>名前<input name="name" required maxlength="100" autocomplete="off"></label><label>取得方法<select name="adapter"><option value="rss">RSS / Atom</option></select></label><p id="source-adapter-help" class="muted"></p><label>配信元URL（YouTubeは@ハンドル・IDも可）<input name="url" required type="text" placeholder="https://example.com/feed.xml"></label><label>種類<select name="kind"><option value="tech">テック</option><option value="blog">ブログ</option><option value="news">ニュース</option><option value="comic">漫画</option><option value="rss">その他の記事</option><option value="podcast">Podcast</option><option value="paper">論文</option><option value="video">YouTube</option></select></label><button type="submit" class="primary">追加する</button><p id="source-error" role="alert"></p></form></section>
+  </dialog>
+  <footer class="shell footer">xangi-feed <span>好みは少しずつ。新しい発見も。</span></footer>
+</body>
+</html>

@@ -1,0 +1,9 @@
+[project]
+name = "xangi-feed"
+version = "0.1.0"
+description = "RSS・Podcast・論文・YouTubeを読み、好みを育て、xangiで議論する拡張"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false
