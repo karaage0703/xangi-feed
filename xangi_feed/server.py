@@ -125,16 +125,44 @@ class Handler(BaseHTTPRequestHandler):
             elif mutation and path == '/api/discovery/refresh':
                 started = self.server.discovery.request_refresh()
                 self.send(202 if started else 200, self.server.discovery.status())
+            elif not mutation and path == '/api/analyses':
+                ids = query.get('id', [])
+                if not 1 <= len(ids) <= 100 or any(not item_id or len(item_id) > 128 for item_id in ids):
+                    raise ValueError('解説を取得する記事は1〜100件で指定してください')
+                self.send(200, {'analyses': store.current_analyses(ids)})
             elif not mutation and path == "/api/items":
                 one = lambda key, default="": query.get(key, [default])[0]
                 limit = max(1, min(100, int(one("limit", "50"))))
                 offset = max(0, int(one("offset", "0")))
-                result = store.list_items(one("tab", "recommended"), one("kind"), one("q")[:200], one("source"), limit, offset, sort=one('sort') or None, topics=query.get('topic', []), tags=query.get('tag', []), kinds=query.get('kind', []))
+                result = store.list_items(one("tab", "recommended"), one("kind"), one("q")[:200], one("source"), limit, offset, sort=one('sort') or None, topics=query.get('topic', []), tags=query.get('tag', []), kinds=query.get('kind', []), custom_filter=one('custom_filter'), search_query=one('search')[:200])
                 cached = self.server.previews.cached_for(result['items'])
                 for item in result['items']:
                     if item['id'] in cached: item['link_preview'] = cached[item['id']]
                 self.server.enricher.enqueue(result['items'][:50])
                 self.send(200, result)
+            elif not mutation and path == '/api/views':
+                self.send(200, {'filters': store.ensure_custom_views()})
+            elif mutation and path == '/api/views/rename':
+                if set(data) != {'id', 'name'}:
+                    raise ValueError('一覧IDと名前を指定してください')
+                self.send(200, {'filter': store.rename_custom_view(data['id'], data['name'])})
+            elif mutation and path == '/api/views/save':
+                self.send(200, {'filter': store.save_view(data)})
+            elif not mutation and path == '/api/custom-filters':
+                self.send(200, {'filters': store.custom_filters(), 'default_classification': store.default_custom_classification()})
+            elif mutation and path == '/api/custom-filters':
+                self.send(200, store.save_custom_filter(data))
+            elif mutation and path == '/api/custom-filters/classification':
+                self.send(200, store.save_custom_classification(data))
+            elif mutation and path == '/api/custom-filters/reorder':
+                if set(data) != {'ids'}:
+                    raise ValueError('タブのID一覧を指定してください')
+                self.send(200, {'filters': store.reorder_custom_filters(data['ids'])})
+            elif mutation and path == '/api/custom-filters/delete':
+                if set(data) != {'id', 'confirm'} or data.get('confirm') is not True:
+                    raise ValueError('削除の確認が必要です')
+                store.delete_custom_filter(data['id'])
+                self.send(200, {'deleted': True})
             elif not mutation and path == '/api/recommendations':
                 settings = store.settings()
                 self.send(200, {key: settings[key] for key in RECOMMENDATION_DEFAULTS})
@@ -146,12 +174,18 @@ class Handler(BaseHTTPRequestHandler):
                 store.delete_tag(data['name'])
                 self.send(200, {'deleted': True})
             elif not mutation and path == '/api/settings':
+                default_backend = {}
                 try:
                     agents = self.server.host.agents() if self.server.host.configured else []
                     agent_error = None
                 except Exception:
                     agents, agent_error = [], 'AIの候補を取得できません。現在の担当のまま停止・設定保存はできます。'
-                self.send(200, {**store.settings(), 'save_mode': 'skill', 'save_available': self.server.host.configured, 'agent_error': agent_error, 'agents': [
+                if self.server.host.configured and hasattr(self.server.host, 'default_backend'):
+                    try:
+                        default_backend = self.server.host.default_backend()
+                    except Exception:
+                        agent_error = agent_error or '本体の既定担当を取得できません。接続先を確認してください。'
+                self.send(200, {**store.settings(), 'host_url': getattr(self.server.host, 'base_url', ''), 'ai_mode': 'direct' if os.environ.get('XANGI_FEED_DIRECT_LLM') == '1' else 'host', 'default_backend': default_backend, 'save_mode': 'skill', 'save_available': self.server.host.configured, 'agent_error': agent_error, 'agents': [
                     {'id': a['id'], 'name': a['name'], 'backend': a.get('backend', ''),
                      'model': a.get('model', ''), 'available': a.get('available', True)} for a in agents]})
             elif not mutation and path == '/api/discussion-options':
@@ -165,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('利用できる保存担当AIを選んでください')
                 previous = store.settings()
                 settings = store.save_settings(data)
-                if settings['discovery_prompt'] != previous['discovery_prompt']:
+                if any(settings[key] != previous[key] for key in ['discovery_prompt', 'discovery_use_personal_context']):
                     self.server.discovery.request_refresh()
                 elif settings['discovery_enabled'] and {'discovery_enabled', 'discovery_interval_hours'} & data.keys():
                     self.server.discovery.trigger()
@@ -178,7 +212,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('backgroundはbooleanです')
                 if background:
                     item, created = store.add_article(data)
-                    if item['content_origin'] == 'manual' and not item.get('content_text'):
+                    if item['content_origin'] in {'manual', 'discovery'} and not item.get('content_text'):
                         item = self.server.articles.start(item['id'])
                 else:
                     item, created = self.server.articles.add(data)
@@ -233,7 +267,17 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError('リンク読了は保存済み設定に従います。追加オプションは不要です')
                     self.send(200, store.open_item(parts[3]))
                 elif mutation and len(parts) == 5 and parts[4] == "react":
-                    self.send(200, store.react(parts[3], data))
+                    view_id = query.get('custom_filter', [''])[0]
+                    search = query.get('search', [''])[0]
+                    if len(search) > 200:
+                        raise ValueError('検索語は200文字以内です')
+                    with store.transaction():
+                        if view_id:
+                            store.custom_filter(view_id)
+                        item = store.react(parts[3], data)
+                        if view_id:
+                            item['view_matches'] = bool(store.list_items(custom_filter=view_id, search_query=search, only_ids=[parts[3]], limit=1)['total'])
+                    self.send(200, item)
                 elif mutation and len(parts) == 5 and parts[4] == 'tags':
                     if len(data) != 1 or next(iter(data)) not in {'add', 'remove'}:
                         raise ValueError('addまたはremoveを一つ指定してください')
@@ -312,7 +356,6 @@ def main():
     worker.start()
     print(json.dumps({"schemaVersion": 2, "event": "ready", "id": "xangi-feed",
                       "baseUrl": f"http://127.0.0.1:{server.server_port}", "workspace": str(workspace)}), flush=True)
-    server.enricher.configure_agent()
     server.enricher.start()
     server.collector.start()
     server.discovery.start()

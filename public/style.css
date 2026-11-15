@@ -142,6 +142,10 @@ h3 {
   padding:0 28px
 }
 .tabs {
+  position:sticky;
+  top:0;
+  z-index:5;
+  background:var(--bg);
   display:flex;
   gap:8px;
   padding-top:18px;
@@ -756,12 +760,9 @@ textarea:focus-visible {
     grid-row:1;
     width:44px;
     padding:0;
-    font-size:0;
   }
-  #refresh::before {
-    content:'↻';
-    font-size:24px;
-  }
+  #refresh span { display:none; }
+  #refresh .refresh-icon { display:block; }
   #article-open {
     grid-column:3;
     grid-row:2;
@@ -769,13 +770,6 @@ textarea:focus-visible {
   #settings-open {
     grid-column:3;
     grid-row:1;
-  }
-  #view-description {
-    position:absolute;
-    width:1px;
-    height:1px;
-    overflow:hidden;
-    clip-path:inset(50%);
   }
   .filters {
     margin-top:14px;
@@ -812,7 +806,7 @@ textarea:focus-visible {
 #topic-choices, #active-filters { display:flex; flex-wrap:wrap; gap:8px; }
 #topic-choices .topic, .topics button.topic { min-height:40px; cursor:pointer; white-space:normal; }
 #source-search, #source { width:100%; min-width:0; margin-top:8px; }
-#source { padding:4px; height:200px; font-size:13px; }
+#source { padding:4px; height:auto; font-size:13px; }
 #source option { padding:8px 6px; }
 #classification-open { display:none; }
 #active-filters { padding:10px 0 0; }
@@ -927,12 +921,8 @@ body.resizing-classification { cursor:col-resize; user-select:none; }
 
 #discovery-form { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; }
 #discovery-form label { min-width: 0; }
-#discovery-results { display: grid; gap: 16px; margin-top: 16px; }
-.discovery-card { padding: 16px; overflow-wrap: anywhere; }
-.discovery-card a, .discovery-card button { margin: 8px 12px 0 0; }
 #discovery-panel { min-width: 0; }
 
-#discovery-title { font-size: 22px; line-height: 1.4; }
 
 /* Extension chrome follows xangi-tasks: home SVG, compact controls, shared theme. */
 .topbar { flex-direction:row; max-width:none; min-height:66px; padding:12px 28px; gap:16px; background:var(--surface); }
@@ -944,9 +934,11 @@ body.resizing-classification { cursor:col-resize; user-select:none; }
 .header-preferences { display:flex; align-items:center; gap:6px; min-width:0; }
 .header-preferences button, .theme-select select { min-height:44px; height:44px; padding:7px 10px; border-radius:6px; font-size:13px; white-space:nowrap; }
 .theme-select { display:flex; min-width:0; }
-.feed-actions { max-width:1240px; margin:auto; padding:12px 28px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.feed-actions { max-width:none; margin:auto; padding:12px 28px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .feed-actions > span { color:var(--muted); font-size:12px; }
-.feed-actions > div { display:flex; gap:8px; flex-shrink:0; }
+.feed-actions > div { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+.feed-actions button { display:inline-flex; align-items:center; justify-content:center; height:44px; white-space:nowrap; }
+.refresh-icon { display:none; flex-shrink:0; }
 #discovery-form .discovery-prompt { display:flex; flex:1 1 100%; flex-direction:column; gap:6px; }
 .discovery-prompt textarea { width:100%; min-height:96px; resize:vertical; font:inherit; border:1px solid var(--line); border-radius:6px; padding:10px; color:var(--ink); background:var(--surface); }
 .discovery-prompt .muted { font-size:13px; }
@@ -956,7 +948,7 @@ body.resizing-classification { cursor:col-resize; user-select:none; }
   .topbar .brand h1 { display:none; }
   .topbar .home-link { width:44px; padding:0; justify-content:center; }
   .topbar .home-link span { display:none; }
-  .feed-actions { padding:6px 16px; gap:8px; flex-wrap:nowrap; }
+  .feed-actions { padding:6px 12px; gap:8px; flex-wrap:nowrap; }
   .feed-actions > span { flex:1 1 0; min-width:0; line-height:1.35; overflow-wrap:anywhere; }
   .feed-actions > div { margin-left:auto; }
 }
@@ -974,3 +966,145 @@ body.resizing-classification { cursor:col-resize; user-select:none; }
 .link-card-title { font-size:15px; line-height:1.45; }
 .link-card-site { font-size:12px; color:var(--muted); }
 .link-card-description { font-size:13px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+
+#discovery-toggle { margin-block:12px; }
+#discovery-toggle > summary { cursor:pointer; min-height:44px; padding:10px 0; }
+#discovery-toggle[open] > summary { margin-bottom:12px; }
+/* The host supplies shared navigation and theme controls in embedded mode. */
+:root[data-xangi-embedded="true"] .theme-select{display:none}
+
+/* Optional embedded presentation chosen by this extension. */
+:root[data-xangi-embedded="true"] #home{display:none}
+
+/* Embedded reading controls start at the same inset as the extension header. */
+:root[data-xangi-embedded="true"] .reading-layout,
+:root[data-xangi-embedded="true"] .feed-actions {
+  max-width:none;
+  width:100%;
+  margin-inline:0;
+}
+
+@media(max-width:900px){
+  .topbar{height:60px;min-height:60px;padding:8px 12px;justify-content:space-between}
+  .topbar .brand{flex:1}
+  .topbar .brand h1{display:block;font-size:18px}
+  .topbar #classification-open{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;flex-shrink:0}
+  .header-preferences{margin-left:auto}
+  .filters .search-label{width:100%}
+}
+
+/* Keep classification controls together and bring articles above the fold. */
+#classification-open{position:relative}
+#classification-count{position:absolute;top:0;right:0;min-width:18px;padding:0 3px;border-radius:9px;background:var(--accent-soft);color:var(--ink);font-size:11px;line-height:18px;font-weight:700}
+#classification-count[hidden]{display:none}
+#classification-controls #active-filters{padding:0 0 12px;margin-bottom:12px;border-bottom:1px solid var(--line)}
+.tabs{padding-block:4px;gap:4px}
+.reading-layout .filters{padding:8px 0;margin-top:0}
+.recommendation-panel{padding:0 0 4px}
+#recommendation-form{margin-top:0;gap:4px}
+#recommendation-message:empty{display:none}
+.list-info{gap:4px 8px;min-height:44px}
+@media(max-width:900px){
+  .feed-actions{padding-block:4px}
+  .list-info{flex-wrap:nowrap}
+  #result-count{flex:1;min-width:0;font-size:12px;line-height:1.4}
+  .sort-control{flex-shrink:0}
+  .sort-control select{width:min(210px,55vw);font-size:13px}
+}
+
+#custom-filter-controls { margin: 0 0 8px; min-width: 0; }
+.custom-filter-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+#custom-filter-name { width: 100%; min-width: 0; }
+
+#custom-filter-tabs { display: inline-flex; gap: inherit; flex-shrink: 0; }
+.tabs > button { flex-shrink: 0; }
+#custom-filter-tabs button { max-width: 18em; overflow: hidden; text-overflow: ellipsis; }
+#custom-filter-new { width: min(420px, calc(100% - 32px)); }
+#custom-filter-new input { width: 100%; }
+
+#classification-save-message { font-size: 12px; font-weight: normal; }
+
+/* All lists share one sidebar and a collapsible filter panel. */
+.view-menu, #custom-filter-tabs { display: flex; flex-direction: column; gap: 4px; }
+.view-menu button { width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+#custom-filter-tabs button { max-width: none; overflow: visible; text-overflow: clip; }
+.view-menu button[aria-pressed=true] { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+#classification-controls { max-height: calc(100dvh - 130px); overflow-y: auto; }
+#current-view-title { font-size: 22px; margin: 8px 0; }
+.view-filter { border-block: 1px solid var(--line); margin-bottom: 12px; }
+.view-filter > summary { cursor: pointer; padding: 12px 0; font-weight: 700; }
+#filter-summary { font-size: 12px; font-weight: normal; }
+.state-filter-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+#filter-classification-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
+#filter-classification-controls #active-filters { grid-column: 1 / -1; }
+#filter-sort-slot { margin-block: 12px; }
+#filter-sort-slot .sort-control { display: flex; align-items: center; gap: 8px; }
+@media (max-width: 900px) { #classification-controls { max-height: none; } .state-filter-grid, #filter-classification-controls { grid-template-columns: minmax(0, 1fr); } }
+
+/* Reading stays compact; saved-list editing lives in the sidebar dialog. */
+.view-row { display: flex; gap: 4px; min-width: 0; }
+.view-row > [data-custom-filter] { flex: 1; min-width: 0; }
+.view-row > .view-settings-button { flex: 0 0 44px; width: 44px; text-align: center; }
+#reading-controls { margin-bottom: 12px; }
+#reading-controls > .search-label { display: block; }
+#reading-controls input { width: 100%; }
+.reading-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.reading-toolbar { margin-top: 8px; }
+#filter-sort-slot { margin: 0; min-width: 0; }
+#filter-sort-slot select { max-width: 100%; }
+#view-settings, #source-picker { width: min(760px, calc(100% - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; }
+#view-settings > details > summary, #view-settings #view-state-group > summary, #view-settings #view-classification-group > summary { cursor: pointer; padding-block: 12px; min-height: 44px; font-weight: 700; }
+#view-settings .dialog-toolbar, #source-picker .dialog-toolbar { position: sticky; top: 0; z-index: 2; background: var(--surface); }
+#source[hidden] { display: none; }
+#source-picker-open { width: 100%; text-align: left; }
+#source-results { display: grid; gap: 4px; }
+#source-results button { width: 100%; text-align: left; overflow-wrap: anywhere; }
+#source-results button[aria-pressed=true] { border-color: var(--accent); color: var(--accent); }
+#source-search { width: 100%; }
+.reading-state { border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-weight: 700; }
+.reading-state.is-unread { color: var(--accent); }
+#classification-save-message:empty, #custom-filter-message:empty { display: none; }
+@media (max-width: 600px) { #view-settings input, #view-settings select, #source-picker input { font-size: 16px; } }
+.actions.compact-actions { flex-wrap: wrap; }
+
+/* Frequent reading controls use the same quiet density as the action icons. */
+#view-filter-open { display: inline-flex; align-items: center; justify-content: center; height: 36px; min-height: 36px; padding: 4px 8px; font-size: 13px; line-height: 20px; border-color: transparent; background: transparent; }
+#filter-sort-slot .sort-control { flex-wrap: nowrap; gap: 4px; font-size: 13px; line-height: 20px; }
+#filter-sort-slot .sort-control > span { white-space: nowrap; }
+#filter-sort-slot select { height: 36px; min-height: 36px; padding: 4px 6px; font-size: 13px; line-height: 20px; }
+
+/* List management and article filters have separate entry points. */
+#filter-dialog { width: min(760px, calc(100% - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; }
+#filter-dialog .dialog-toolbar { position: sticky; top: 0; z-index: 2; background: var(--surface); }
+#filter-dialog summary { cursor: pointer; padding-block: 10px; min-height: 40px; font-weight: 700; }
+#filter-dialog #kind-choices { display: flex; flex-wrap: wrap; gap: 4px; }
+#filter-dialog .classification-choice { min-height: 36px; padding: 4px 8px; font-size: 13px; }
+.filter-reset { min-height: 36px; padding: 4px 8px; font-size: 13px; border-color: transparent; background: transparent; }
+.filter-reset[aria-pressed=true] { border-bottom-color: var(--accent); color: var(--accent); }
+@media(max-width:600px) { #filter-dialog input, #filter-dialog select { font-size: 16px; } }
+
+#view-settings .dialog-toolbar h2 { min-width: 0; overflow-wrap: anywhere; }
+#view-settings-close, #filter-dialog-close { flex-shrink: 0; white-space: nowrap; }
+
+/* Quiet, task-style saved views with a visible drag handle. */
+.view-menu button { border: 0; background: transparent; border-radius: 4px; }
+.view-menu button:hover { background: var(--accent-soft); }
+.view-row { position: relative; gap: 0; align-items: center; }
+.view-row > [data-custom-filter] { font-size: 14px; padding: 8px; }
+.view-row > [data-custom-filter][aria-pressed=true] { background: var(--accent-soft); color: var(--accent); }
+.view-row > .view-drag-handle { flex: 0 0 28px; width: 28px; padding: 0; color: var(--muted); cursor: grab; touch-action: none; user-select: none; text-align: center; }
+.view-row > .view-settings-button { padding: 0; color: var(--muted); }
+.view-row.is-dragging { opacity: .5; }
+.view-row[data-drop-position]::before { content: ''; position: absolute; height: 2px; background: var(--accent); left: 0; right: 0; pointer-events: none; }
+.view-row[data-drop-position=before]::before { top: -2px; }
+.view-row[data-drop-position=after]::before { bottom: -2px; }
+#custom-filter-plus { margin-top: 8px; font-size: 13px; color: var(--muted); }
+
+/* Reserve preview geometry before metadata and images arrive. */
+.link-card { position: relative; height: 112px; }
+.link-card img { position: absolute; inset: 0 auto 0 0; width: 112px; height: 100%; object-fit: contain; }
+.link-card-text { height: 100%; overflow: hidden; }
+.link-card:has(img) .link-card-text { padding-left: 124px; }
+.link-card-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.link-card-site { font-size: 12px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.link-card-description { font-size: 12px; line-height: 16px; -webkit-line-clamp: 1; }

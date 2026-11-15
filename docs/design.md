@@ -72,7 +72,7 @@ scoreは `新しさ係数/(1+経過時間/48h) + 好み係数*tanh(話題weight�
 
 `Enricher` は登録済みAIに1記事ずつ渡し、`title_ja`・`summary_ja`・`comment`・`evidence_ids`を生成する。タイトル・取得本文/抜粋・種類と、xangi-searchの関連資料（最大3件、抜粋各600文字）が入力になる。Good／Bad・メモは渡さない。
 
-- local-llmは選択モデルへ直接JSON生成を要求する。出力上限2048トークン、thinking無効。その他の担当は専用automation sessionとchat SSEを使い、終了処理の失敗で生成結果や元の例外を上書きしない。
+- AI生成は本体のautomation sessionとchat SSEを標準とする。担当未設定なら本体の既定を使い、mailの担当は借りない。LOCAL_LLM設定の継承だけでは直接接続しない。明示的なXANGI_FEED_DIRECT_LLM=1の場合だけ、選択local-llmへ直接JSON生成（出力上限2048、thinking無効）できる。直接接続は本体の監視・停止・利用量記録の対象外。
 - 待ち時間は既定300秒（1〜1800秒）、待ち行列200件。取得後は直近14日から既定30件（0〜100件）、一覧表示時は先頭50件を候補にする。
 - 有効な記事ID・日本語の見出し/要点/コメント・参照IDを検証する。参照は渡した資料から最大3件で、未知・重複・他記事のIDを拒否する。
 - 入力hashが同じ解説を再利用する。Good／Badや表示条件の変更では失効させず、本文の変更中に生成した古い結果は採用しない。
@@ -80,6 +80,12 @@ scoreは `新しさ係数/(1+経過時間/48h) + 好み係数*tanh(話題weight�
 - 再起動時のpendingは復元し、processingは結果不明のerrorにする。自動解説停止中は新たにAIへ送らない。件数0でも一覧表示による追加は有効。
 
 ## 根拠付きAIコメント
+
+コメントは記事の具体的な使い道・試す手順・注意点を説明する。関連記録は用途を考えるための参考資料で、本人の希望や予定を証明するものとして扱わない。検索結果に発言者・出所の確認情報がないため、AIの提案・自動処理・引用と本人の直接発言を区別できない場合は、本人の事実を断定せず用途や条件で述べる。
+
+生成AIには記録の抜粋と参照照合用IDを渡し、ファイル名・パスを渡さない。IDはevidence_idsだけに使い、本文へ番号・記録ファイル名が出た応答は採用しない。出典のパスと抜粋は「コメント生成時に参照した記録」で確認できる。
+
+番号や記録ファイル名に依存した保存済みコメントは文字列置換で作文せず、要約と元の保存値を保持して書き直し対象にする。AIが有効なら表示時の待ち行列へ追加し、完了時に表示を更新する。停止中・失敗時は書き直す操作を案内する。読みやすいコメントやAmazon S3などの技術名だけの文章は、そのまま再利用する。
 
 生成時の検索状態と、AIが実際に引用した記録のID・path・抜粋をcomment_contextへ保存する。AI応答から出典pathを採用せず、サーバー側の検索結果だけを対応付ける。コメントと出典は同じanalysis結果へ保存する。search失敗は要約・コメント生成を止めず、空の根拠として明示する。
 
@@ -91,7 +97,7 @@ scoreは `新しさ係数/(1+経過時間/48h) + 好み係数*tanh(話題weight�
 
 Store.itemとlist_itemsの両方でpreference_scoreとpreference_knownを返す。同じ計算を使い、既知の0と評価なしを区別する。rating/reason更新の応答にはpreference_weightsを含め、ブラウザは表示中の記事の点数を更新する。表示順は変えない。
 
-itemsへpublication_name / authorを空文字既定で追加する。RSS／Atomのchannel/feed titleとauthor/creator、entry source、HTMLのog:site_nameとauthor、YouTube videoDetails.authorを保存する。取得失敗や情報欠落で既存値を空にしない。一般的なサービス名で固有名を上書きしない。
+itemsのpublication_name / authorは空文字を既定とする。RSS／Atomのchannel/feed titleとauthor/creator、entry source、HTMLのog:site_nameとauthor、YouTube videoDetails.authorを保存する。取得失敗や情報欠落で既存値を空にしない。一般的なサービス名で固有名を上書きしない。
 
 publisher_labelは固有の配信元名・著者・URLのドメインを組み合わせる。note.com/<account>/n、qiita.com/<account>/items、zenn.dev/<account>/articles等ではアカウント部分をURLから表示する。名前が不明な場合はアドレスを表示し、著者名を推測しない。
 配信元は日付より大きく太字・本文色で表示し、記事タイトルより控えめにする。長い名称やドメインは折り返す。
@@ -130,7 +136,7 @@ discussion_requestsに送信前のjournalを保存する。起動時もpending�
 更新はJSONのみ、最大16KiB。APIは認証情報を返さない。
 
 - `GET /api/health`: version、ready、collector、discussion_available。
-- `GET /api/items?tab=recommended|all|manual|saved|notes|read|discussed|muted&sort=updated|published|preference|recommended&kind=tech|blog|news|comic|rss|podcast|paper|video&q=&source=&limit=50&offset=0`: 一覧。sortは既定updated、最大100件/ページ。
+- `GET /api/items?tab=recommended|discovery|all|manual|saved|notes|read|discussed|muted&sort=updated|published|preference|recommended|read_at|manual_added_at&kind=tech|blog|news|comic|rss|podcast|paper|video&q=&source=&limit=50&offset=0`: 一覧。sortの既定値は読了でread_at、個別追加でmanual_added_at、それ以外はupdated。最大100件/ページ。
 - `GET /api/items/{id}`: 本文抜粋、評価、配信元、会話状態。
 - `GET /api/items/{id}/evidence`: xangi-searchの関連資料と取得状態。
 - `POST /api/items/{id}/react`: rating、saved、read、reason、mutedの部分更新。
@@ -300,11 +306,13 @@ manual_tags(name)とitem_tags(item_id, tag_name)の追加テーブルで管理�
 
 ## カスタム条件とPWAの記事リンク
 
-xangi-tasksの一覧内オプション開閉を参考に、優先する要素をカスタムのトップに表示し、期間等の条件をdetailsへ格納する。フォームは単一とし設定ダイアログ側に複製しない。保存には既存POST /api/settingsを使用し、変更時に自動保存・再表示する。保存後も現在のtabを維持する。GET /api/recommendationsは既存のカスタム設定だけを返し、エージェント列挙やNotion設定の読み取りを伴わない。初回読み込み成功までfieldsetを無効化し、未取得の初期値で保存しない。
+カスタム一覧では優先する要素を表示し、期間等の条件をdetailsへ格納する。フォームは単一とし設定ダイアログ側に複製しない。保存には既存POST /api/settingsを使用し、変更時に自動保存・再表示する。保存後も現在のtabを維持する。GET /api/recommendationsは既存のカスタム設定だけを返し、エージェント列挙やNotion設定の読み取りを伴わない。初回読み込み成功までfieldsetを無効化し、未取得の初期値で保存しない。
 
 記事一覧と詳細の原文は通常anchor（target=_blank、rel=noopener noreferrer）を基本とし、後述のiPhone PWAのSafariアプリ起動モードではOSハンドラのURIへ切り替える。クリックをpreventDefaultせず、タップでブラウザが直接別画面を開く。元のフィードは遷移しない。共有・コピーdialogは記事のメニューから明示的に開く補助機能で、主操作に挟まない。
 
-仕様参照: [WebKit User Activation API](https://webkit.org/blog/13862/the-user-activation-api/)、[MDN Window.open](https://developer.mozilla.org/en-US/docs/Web/API/Window/open)。実機のOS固有の挙動を解消済みとはせず、最初に申告されたPWAで開かない現象の原因は未確定。xangiホストの拡張はiframeではなく同じページへのlocation.assignで開かれ、サービスproxyは拡張のCSPを転送する（対象コードを確認）。今回の修正ではホスト設定を変更しない。 [Apple WWDC23の説明](https://developer.apple.com/videos/play/wwdc2023/10120/)ではiOSのHome Screen web appのスコープ外リンクがSafari View Controllerで開くとされるため、JavaScriptで遷移先を変えずnative linkをOSへ渡す方針とした。実機の表示形式は別途確認する。
+原文リンクはブラウザのユーザー操作として扱われるnative anchorを使う。xangiホストは同じページへのlocation.assignで拡張を開き、サービスproxyから拡張のCSPを配信する。iPhoneのホーム画面版では、表示形式やSafariの起動先がOSのバージョン・設定に依存する。実機での挙動は別途確認する。
+
+仕様参照: [WebKit User Activation API](https://webkit.org/blog/13862/the-user-activation-api/)、[MDN Window.open](https://developer.mozilla.org/en-US/docs/Web/API/Window/open)、[Apple WWDC23](https://developer.apple.com/videos/play/wwdc2023/10120/)。
 
 検証: `uv run --offline --with playwright python tests/top_controls_pwa_browser.py /absolute/path/to/evidence`。トップからの条件適用と再読込保持、通常ブラウザの別タブ、standaloneを模した2系統の環境で、1タップの別画面、元フィードのURL保持、詳細から別画面へ開いた後も詳細を維持、明示的な共有・コピーの補助操作をfixtureで確認する。JavaScriptのwindow.openを禁止してもnative anchorで別画面が開くことを検証する。
 
@@ -330,7 +338,7 @@ iOS判定はiPhone/iPad/iPodのUA、またはMacIntel＋複数touch pointsのiPa
 
 検証: tests/external_safari_browser.pyでiPhone/iPad PWAのURI生成、通常iPhone/PC/Androidで非変換、設定OFF保持/ON復帰、原文URL保持、読了ON/OFFを確認。OSのプロトコルハンドラ部分は模擬受付であり、Safari実起動を検証したことにはしない。
 
-## 読了履歴とカスタム条件の即時反映
+## 読了状態と一覧の更新
 
 items.read_at（nullable REAL）を追加。既存read=1の日時はNULLのまま保持し、推測で補完しない。未読→読了の遷移だけtime.time()をサーバーで保存し、既に読了の場合は保存時刻を変えない。未読化でread_atをNULLへ戻す。手動reactとopen_itemの双方を同一transaction内の判定で扱う。クライアント提供のread_atは書き込まない。
 
@@ -360,49 +368,68 @@ background:trueで追加すると本文取得は別スレッドで動き、GET /
 
 items.manually_added（INTEGER NOT NULL DEFAULT 0）で、個別追加した事実を本文のcontent_originやkindと分けて保持する。新規・既存どちらのPOST /api/itemsでも1にする。RSS再取得はこの列を更新しない。
 
-GET /api/items?tab=manualはmanually_added=1を件数・ページングの前に選ぶ。カスタム条件・読了による除外はせず、ミュート済みは除外し、種類・検索・配信元・タグとのANDは維持する。新しい種類は作らず、ブログ・YouTubeの区別も保持する。上部の既存表示メニューへ「個別追加」を加え、一覧と詳細のメタ情報にも印を表示する。空状態から記事追加へ進める。
+GET /api/items?tab=manualはmanually_added=1を件数・ページングの前に選ぶ。カスタム条件・読了による除外はせず、ミュート済みは除外し、種類・検索・配信元・タグとのANDは維持する。記事の種類（ブログ・YouTubeなど）は個別追加によって変更しない。「個別追加」は一覧切替メニューに表示し、一覧と詳細のメタ情報に個別追加の印を表示する。空状態から記事追加へ進める。
 
 既存の配色・フォーカス・横スクロール可能な表示メニューを維持。PCとスマホで「個別追加→記事追加→詳細→戻る→種類/検索→読了→再表示」を確認する。参考: https://design.digital.go.jp/dads/components/tab/ （表示目的の切り替えと絞り込みを区別し、種類は既存の分類コントロールを使う）。
 
 
 ## おすすめ検索
 
-公開Webの検索結果からRSS/Atomを検証し、新しい記事を最大6件返す。画面の使い方は[おすすめの記事](usage.md#おすすめの記事)を参照。
+「おすすめ」は公開Webの探索で見つけた未読記事の一覧。記事の表示・検索・分類・評価・ブックマーク・メモ・タグ・読了・ミュート・共有・AIコメント・議論・保存依頼は、各一覧で同じ記事データとUIを使う。操作は[おすすめの記事](usage.md#おすすめの記事)を参照。
 
-### 検索条件
+### 記事の一覧と状態
 
-| 入力 | 関心語の取得元 | 候補の条件 |
-| --- | --- | --- |
-| 検索指示あり | 指示から作る検索計画 | 見出し・抜粋に検索語の全単語を含み、言語・期間・除外語の条件に合う |
-| 検索指示なし | Goodから得た上位3話題 | 学習した関心語に一致し、話題の重みを合計すると正になる |
+見つかった記事は「すべて」にも表示する。読了にすると「おすすめ」から外れ、「すべて」「読了」に残る。未読に戻すとおすすめへ戻り、ミュート中の記事は「ミュート」から解除できる。
 
-`discovery_prompt`は2000文字まで。検索計画はqueries（最大3件、各150文字）、language（ja/any）、exclude_terms（最大8件）、max_age_days（1〜30日）で表す。複雑な指示は担当AIで整理し、25秒で完了しなければ入力文の先頭150文字と解釈できた条件を使う。適用条件と制限は結果に添える。AIが返したURLを取得する経路は持たない。
+記事の識別にはcanonical URLを使う。同じURLの探索結果・配信元の記事・個別追加は同じIDを参照し、評価・メモ・タグ・読了日時・ブックマーク・会話・保存依頼を保持する。検索条件の変更や空振りで記事を削除せず、過去に見つけた記事も未読の間はおすすめに残る。配信元は自動登録しない。
 
-### 実行のきっかけ
+### 検索条件と個人記録
 
-| 操作 | 保存と検索 |
-| --- | --- |
-| 指示の入力 | 変換確定後650msで設定を保存し、変更後の条件で検索する |
-| 「今すぐ探す」 | 現在の入力を保存し、その条件で1回検索する。同じ条件ならrefresh APIを使う |
-| 定期実行 | 有効時に設定間隔（既定24時間、6〜168時間）で検索する |
+`discovery_prompt`は2000文字まで。指定した話題・言語・除外語・期間から検索計画を作る。指定がなければGoodから得た上位3話題を使う。
 
-保存要求を直列化し、版番号で古い待機要求を省く。実行中の変更は最新設定を1件だけ予約する。結果には対応するprompt/planを保存し、現在の指示と一致する結果だけを表示する。通信失敗時は入力を保持して再試行できる。
+検索計画はqueries（最大3件、各150文字）、language（ja/any）、exclude_terms（最大8件）、max_age_days（1〜30日）を持つ。複雑な指示は担当AIで整理する。25秒で完了しない場合は入力文の先頭150文字と解釈できた条件を使い、制限を設定内に表示する。見出し・抜粋に検索語の全単語を含む記事、またはGoodによる関心語に一致して話題の重みの合計が正になる記事が候補になる。言語・期間・除外語は候補の確認時にも適用する。
 
-### 取得と保存
+`discovery_use_personal_context`はboolean、初期true。ONで担当AIとhost接続がある場合、xangi-searchのhybrid検索から関連記録を最大3件（抜粋各1200文字）取得する。検索には最近の作業・課題と入力条件/Good上位話題を使う。日付で絞るAPIは使用しないため、最新記録の網羅は保証しない。
 
-Bing/Google Newsの公開検索RSSから候補ページを得て、RSS/Atomリンクや一般的なフィードパスを検証する。日付不明・古い記事・登録済み配信元は除外する。取得は公開IP検査・DNS固定・転送回数・容量/時間制限・XMLのDTD/entity拒否を適用する。最大30サイト、6並列、取得全体10秒/結果待ち90秒。
+担当AIは記録から最大3テーマを作り、記録中の日付・進行状態を参考に具体的な作業とのつながりを説明する。明示した言語・期間・除外条件を保持し、参照IDと理由を検証する。取得・計画失敗、関連テーマなし、不正な参照IDの場合は入力指示とGoodによる検索計画を使う。記録検索は10秒、テーマ作成は最大25秒。公開探索には90秒から経過時間を引いた残りを渡す。
 
-検索サービスには検索語だけを送り、記事履歴・メモ・登録URL一覧・関連記録は送らない。条件整理のAIには入力指示と関心語を渡す。結果はmetadataへ保存し、空振り・失敗の再試行間隔は15分。`GET /api/discovery`で状態を読み、`POST /api/discovery/refresh`で非同期検索を要求する。
+公開検索へ送るのは検索語だけで、記事履歴・メモ・登録URL一覧・関連記録の本文やパスは送らない。記録の抜粋は担当AIへ渡す。検索語は一般的な技術名・手法・用途へ変換するよう指示し、明白なパス・URL・メール形式は出力検証で拒否する。任意の秘密文字列を完全検出する仕組みではない。記録利用をOFFにすると新しい探索での参照を止め、取り込み済みの記事や推薦根拠は保持する。
+
+### 操作と定期実行
+
+- 検索指示の入力は変換確定後650msで保存し、その条件で検索する。
+- 「今すぐ探す」は現在の入力を保存して1回検索する。同じ条件ならrefresh APIを使う。
+- 定期実行は既定24時間、6〜168時間で設定できる。空振り・失敗の再試行間隔は15分。
+
+保存要求を直列化し、版番号で古い待機要求を省く。実行中の条件変更は最新設定を1件だけ予約し、変更前の結果を取り込まずに検索し直す。通信失敗時は入力を保持して再試行できる。
+
+画面の「おすすめの設定」には検索条件・更新日時・次回予定・記録の利用状況を表示する。一覧には検索中や失敗時の通知を表示する。
+
+### 公開ページの確認
+
+Bing/Google Newsの公開検索RSSから候補ページを得て、RSS/Atomリンクや一般的なフィードパスを確認し、1回の探索で最大6件を返す。日付不明・古い記事・登録済み配信元は除外する。取得は公開IP検査・DNS固定・転送回数・容量/時間制限・XMLのDTD/entity拒否を適用する。最大30サイト、6並列、取得全体10秒/結果待ち90秒。AIが返したURLを直接取得する経路は持たない。
+
+### 保存形式とAPI
+
+記事本体はitems、おすすめ由来の関連と推薦根拠はdiscovered_items、検索計画と実行状態はmetadataに保存する。新規の探索記事はcontent_origin=discovery、manually_added=0とし、個別追加の一覧には含めない。確認済みの抜粋・公開日・配信元名・音声URLを保存する。
+
+記事・おすすめとの関連・探索状態は同じtransactionで保存する。起動時にもmetadataの候補と記事の関連を整え、同じ処理を繰り返しても重複や読了解除が起きないようにする。Good/Badの集計は探索処理で変更しない。
+
+- `GET /api/items?tab=discovery`: おすすめ由来の未読・非ミュート記事。検索・分類・タグ・並び替え・ページ分割はlist_itemsで処理する。
+- `GET /api/discovery`: 設定・検索計画・実行状態。
+- `POST /api/discovery/refresh`: 現在の設定で非同期の検索を要求する。
+
+候補が実際に一致した検索語をmatched_queryで返し、そのテーマの理由・使用した記録を記事のdiscovery属性へ添える。各一覧と記事詳細では同じ推薦根拠を表示する。本文の明示取得は公開ページの記事取得処理を使う。
 
 ## 拡張共通の画面枠
 
-ヘッダーにホーム・設定・テーマを置き、44px以上のタップ領域とライト/ダークの配色を共通にする。テーマはlocalStorageの`xangi-theme`（system/light/dark）へ保存し、端末設定とstorageイベントに同期する。
+単体表示ではヘッダーにホーム・設定・テーマを置く。本体の埋め込み表示では共通ホームとテーマを本体に任せ、設定などの業務操作だけを残す。分類と記事の領域は本体ナビの内側から広げ、中央寄せの余白を追加しない。44px以上のタップ領域とライト/ダークの配色を保つ。テーマはlocalStorageの`xangi-theme`（system/light/dark）へ保存し、端末設定とstorageイベントに同期する。
 
 ## タブ別の分類条件
 
-記事一覧の8タブで種類・話題・自分のタグ・配信元・記事検索・配信元名検索を独立して保持する。localStorageのxangi-feed-classification:<tab>を使用し、未設定なら空の条件を復元する。切替直前に表示中の入力を保存し、切替先の条件と操作表示を復元してから取得する。検索デバウンスの未実行入力も切替時に保存する。
+旧tab APIの分類条件は従来のlocalStorage経路を保持する。現在の画面は後述する「保存した一覧と共通フィルター」に統一し、分類・状態・好み等をサーバに保存する。配信元候補の検索文字列やパネル幅は端末ごとに保持する。
 
-分類候補と配信元の初期読込完了前は保存・復元を始めない。値は許可済みの種類・話題・現存タグ・現存配信元へ限定し、不正JSONや削除済みの値は復元しない。「すべて解除」は現在のタブの条件だけを空にする。localStorageが使えない時も画面内のMapでタブ間の独立を保つ。おすすめは独自の検索設定を持つため記事一覧の分類保存に含めない。
+分類候補と配信元の初期読込完了前は保存・復元を始めない。値は許可済みの種類・話題・現存タグ・現存配信元へ限定し、不正JSONや削除済みの値は復元しない。「すべて解除」は現在のタブの条件だけを空にする。localStorageが使えない時も画面内のMapでタブ間の独立を保つ。おすすめの探索設定は、記事一覧の分類条件とは別に保存する。
 
 ## リンクカード
 
@@ -432,3 +459,67 @@ uv run --with playwright python scripts/docs-screenshots.py
 ```
 
 Chromiumの場所は`PLAYWRIGHT_CHROMIUM_EXECUTABLE`で指定できる。スクリプトは外部通信を遮断し、稼働DB・AI・公開フィードを使わない。リンクカードの図もスクリプト内のHTML/SVGから生成する。
+
+スマホでは小さなアプリ名と分類を開くボタン・設定を上部の1段に置きます。更新・記事追加・検索は業務領域に残します。
+
+一覧上部では、分類の選択チップを本文へ重ねずclassification-controls内で管理します。スマホの分類入口に選択数を表示し、詳細からタグで絞り込んだ後のフォーカスは分類入口へ戻します。タブ・検索・カスタム条件の余白を詰め、初期状態の自動保存説明は常時表示せず、保存・エラー等の状態は引き続き表示します。
+
+スクロールでスキップの操作検証: `uv run --offline --with playwright python tests/scroll_skip_browser.py /absolute/path/to/evidence`。必要なら `CHROMIUM_EXECUTABLE` で既存のChromiumを指定。fixtureのみでPC/393px/360pxの初期OFF、ON/OFF保持、実表示後の上端通過、未表示・上方向・ブックマーク・読了・ダイアログの除外、ページ送り、解除、保存失敗と再試行、localStorage拒否を確認する。
+
+## 保存した一覧と共通フィルター
+
+画面は左メニューの一覧選択、右の常設検索・頻用操作、記事一覧で構成する。スマホでは既存のドロワーに一覧メニューを置き、選択後に閉じる。保存する分類・状態・好みの上限下限・期間・キーワード条件は、一覧管理とは独立した絞り込みダイアログへ集約する。固定タブの区別を画面からなくし、読了やスキップも編集可能な初期保存条件として扱う。名前だけは明示更新し、フィルターは自動保存する。
+
+GET /api/views は初回に一度だけ旧標準カスタム設定と名前付き項目を引き継ぎ、カスタム/おすすめ/すべて/個別追加/ブックマーク/メモ/読了/議論した記事/スキップの9初期一覧を保存する。metadata/custom-views-v1を移行マーカーとし、以後は編集・削除した初期一覧を戻さない。以前のAPIは維持する。
+
+各一覧はid/name/recommendations/kinds/topics/tags/source/search/sort/conditionsを持つ。conditionsはread(any/unread/read)、muted(exclude/include/only)、saved/noted/discussed(any/yes/no)、origin(any/manual/discovery)、max_preference(null/-100..100)。旧項目でconditionsがなければ未読・スキップを除く条件を補う。更新時にconditionsを省略した旧APIは既存条件を保持する。
+
+POST /api/views/save はidと全フィルターを受け、最新レコードの名前を保持して更新する。GET /api/items?custom_filter=<id> は保存した分類・検索・状態・好みの範囲をサーバ側で適用し、ページング前に絞る。読了・スキップの既存データを書き換えない。上下限を指定すると未評価を除き、上限<下限は拒否する。好み・新しさ順以外の並び順や読了追加順・個別追加順も各一覧で選べる。
+
+順序はmetadata/custom-filter-orderへ保存する。既存のPOST /api/custom-filters/reorderで全ID列を検証し原子的に更新する。初期一覧も順序・名前・条件・削除の対象。通常追加は100件まで、初期一覧9件を含む最大109件の移行と並べ替えを許容する。
+
+UIは保存を直列化して差分がない復元では再保存しない。保存完了を待って一覧を切り替える。失敗時は入力を残し、切替を止めて再試行を案内する。読了・スキップ・ブックマーク等の操作後は共通フィルターで再判定する。おすすめ探索は取得機能として保持し、origin=discoveryの一覧で探索設定を表示する。
+
+UI検証: tests/filter_separation_browser.py。旧タブ・ページ内設定前提のブラウザ検証は新しい左メニュー/ダイアログ構成へ読み替える。サーバの旧tab APIは互換経路として回帰検証を継続する。
+
+## 読む操作と一覧管理の分離
+
+左メニューの各一覧に設定ボタン（…）を設け、名前・複製・削除・順序はview-settings、保存条件は独立したfilter-dialogで編集する。スマホでも同じ入口から開く。条件は種類を先頭に表示し、状態、好み・期間、タグ・配信元・キーワードに折りたたみ、長大なフォームで記事一覧を押し下げない。条件は従来どおり自動保存し、失敗・再試行はダイアログ内と一覧上部の両方で扱う。
+
+読む画面には一覧名、常設一時検索、絞り込みの入口と並び順を置く。各記事はreadの明示ラベル（未読/読了、動画は未視聴/視聴済み）と直接の切替ボタンを持つ。メニューの操作名から状態を推測させない。
+
+searchは一時検索、saved-searchはサーバの保存キーワード条件の編集欄。GET /api/items?custom_filter=<id>&search=<temporary> は保存キーワードと一時検索をANDで適用し、ページング前に絞る。search_query引数は200文字まで。保存データはGETで更新しない。一時検索は設定の自動保存・複製に含めず、一覧切替・再読込で解除する。
+
+配信元のnative selectは非表示のモデルとし、size=7と200px固定表示を廃止する。source-pickerは検索欄と候補ボタンを持ち、表示は先頭50件に制限する。候補検索だけで選択を変えず、候補の決定後に自動保存し、閉じたら起点へフォーカスを戻す。
+
+UI検証: tests/filter_separation_browser.py。旧横タブや管理と条件の共通画面を前提とした任意ブラウザ検証は現行UIを対象としない。管理と絞り込みの分離、一時検索の保存非変更、配信元選択、タグ追加・解除、保存失敗とモーダル内再試行、独立context復元をPC/393px/360pxで確認する。
+
+読了操作は既存のicon-button/action-iconと同じチェックアイコンへ統一する。常時の未読/読了ラベルは維持し、aria-label/titleで操作、aria-pressedで状態を伝える。読了条件の編集・確認は絞り込み内に統一する。追加の大きな操作ボタンを増やさない。
+
+## 一覧管理と絞り込みの入口分離
+
+サイドバーの…はview-settingsに名前/複製/削除/順序のみを表示する。条件はview-filter-openから別のfilter-dialogへ開く。読了条件はfilter-dialog内のselect一つに統一し、quick-readを削除する。種類は最初に表示する。一覧上部の条件要約と定型説明は表示しない。
+
+話題タグと自分のタグにはそれぞれ選択解除（絞り込まない）を置く。空集合は条件なしで、タグがない記事も含む。選択解除は記事のタグを削除しない。話題はfeeds.TOPICSの固定分類、自分のタグは記事への明示追加で増える候補であることを説明する。
+
+POST /api/views/renameはid/nameのみを受け、transaction内で最新の保存条件を読み名前だけを変更する。メタ設定の名前変更でフィルターを再保存せず、view-settingsを閉じるだけでも条件は更新しない。UI検証はtests/filter_separation_browser.py。
+
+## 読む画面の説明とAI更新
+
+一覧上部の条件要約・定型説明を除き、条件は絞り込み内で確認する。取得/追加のボタンは44pxの高さ・中央揃えとし、ヘッダーの右端に揃える。スマホの取得アイコンは文字グリフではなくSVGとする。絞り込みと並び順は高さ36px・行高20px・中央配置を明示し、OSのネイティブ選択欄と文字の基準がずれにくいよう揃える。
+
+AI更新revisionが変わるとGET /api/analyses?id=...で表示中の解説だけを100件ずつ読み、記事の見出しとeditorialのみ差し替える。記事順・追加ページ・メモ入力・フォーカスを保持し、loadVersionが変わった古い応答は適用しない。解説反映のボタンは表示せず、新着記事を読むボタンとは独立させる。失敗時は元の表示を残し、revisionを進めず次回pollで再試行する。APIは本文hashが一致する分析状態だけを読み、AI処理を開始しない。
+
+AI出力の検証エラーは見出し/要点/AIコメントの読者向け表現にする。旧データのtitle_ja/summary_jaを含むエラーは表示時にも読み替える。検証失敗を生成成功として扱わず、原文と前回の成功結果を保持する。
+
+検証: tests/test_analysis_refresh.py、tests/reader_cleanup_browser.py。PC/393px/360pxで表示中120件・記事順・メモとフォーカス・自動反映・旧エラー・反映再試行・新着表示の独立・ボタン配置を確認する。
+
+## 一覧の並べ替えと読む位置の維持
+
+左メニューの保存一覧は枠を外し、選択・hover時だけ背景を付ける。xangi-tasksのカテゴリ行を参考に、名前の左に28pxの移動つまみ、右に設定を置く。ポインターの5px移動からドラッグとし、行の上下半分で挿入位置を示す。通常の名前のクリックは選択のまま。HTML drag/dropとAlt+↑/↓、既存の上下ボタンも同じ並べ替えAPIへ保存する。失敗時は元のサーバ順を保つ。
+
+表示中の保存一覧のブックマーク/既読/スキップは直ちに押下状態を示し、同じ記事の送信を抑止する。POST reactにcustom_filter/searchを渡し、サーバは既存のlist_items判定をonly_idsの一記事に絞ってview_matchesを返す。分類・状態・タグ・検索・好み等の条件を別実装で複製しない。更新対象の存在を検証してから同じtransaction内で更新・判定する。通常の成功時は一覧GET・全再描画を行わず、対象の状態と必要な行削除だけを反映。失敗時はボタンを操作前へ戻して通知する。評価・旧tabの互換経路は従来の再評価を使う。
+
+プレビューは112pxの高さを先に確保し、画像と文字をその中へ収める。遅延画像取得・失敗で行の高さが変わらない。その他の再描画・AI差し替え・通知の挿入では表示中の最初の記事IDと画面内位置を基準に読む位置を維持する。明示的な一覧切替/検索/絞り込みは従来どおり再取得する。
+
+検証: tests/reading_interactions_browser.pyで3幅のポインター/キーボード並べ替え・失敗/復元、プレビュー遅延、送信中の即時状態/重複抑止/失敗復元、120件のDOM順維持と一覧GETなし、フィルター脱落、既存のプレビューOFF保存を確認。tests/test_saved_views.pyは一記事判定と全件判定の一致・不正viewで更新しないことを確認する。

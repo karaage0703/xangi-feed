@@ -111,14 +111,14 @@ def discover(positive, negative, registered, fetcher=None, now=None, stop=None, 
                     date = entry.get('published') or entry.get('updated')
                     entry_topics = topics(entry['title'] + ' ' + entry['summary'])
                     matched = sorted(names.intersection(entry_topics))
-                    query_match = any(all(term in article_text.casefold() for term in query.casefold().split()) for query in plan.get('queries', []) if query.strip())
+                    query_match = next((query for query in plan.get('queries', []) if query.strip() and all(term in article_text.casefold() for term in query.casefold().split())), '')
                     if not query_match and sum(weights.get(t, 0) for t in entry_topics) <= 0: continue
                     if not date or not now - plan.get('max_age_days',30) * 86400 <= date <= now + 86400 or (not matched and not query_match) or scope(entry['url']) in excluded:
                         stats['unmatched_or_old'] += 1; continue
                     return {'id': hashlib.sha256(url.encode()).hexdigest()[:24], 'feed_url': url,
-                            'url': entry['url'], 'title': entry['title'], 'language': 'ja' if japanese(article_text) else 'other', 'source_name': entry.get('publication_name') or scope(url),
+                            'url': entry['url'], 'title': entry['title'], 'summary': entry['summary'], 'audio_url': entry.get('audio_url'), 'language': 'ja' if japanese(article_text) else 'other', 'source_name': entry.get('publication_name') or scope(url),
                             'kind': 'podcast' if entry.get('audio_url') else 'blog', 'reason': ('検索語に一致する最近の記事が公開フィードにあります。' if query_match else 'Goodで関心のある「' + '・'.join(matched) + '」に一致する最近の記事が公開フィードにあります。'),
-                            'matched_topics': matched, 'published': date, 'verified_at': now}, stats
+                            'matched_topics': matched, 'matched_query': query_match, 'published': date, 'verified_at': now}, stats
             except Exception:
                 stats['fetch_failed'] += 1
         return None, stats

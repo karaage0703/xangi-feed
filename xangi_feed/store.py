@@ -13,10 +13,11 @@ from .feeds import web_url, topics, TOPICS
 from .adapters import validate as validate_adapter
 from .youtube import resolve as youtube_feed
 from .catalog import export as catalog_sources
+from .comment_references import present_comment
 from .publication import label as publication_label, clean, GENERIC_NAMES
 
 SOURCE_KINDS = {"rss", "tech", "blog", "news", "comic", "podcast", "paper", "video"}
-DISCOVERY_DEFAULTS = {'discovery_enabled': True, 'discovery_interval_hours': 24, 'discovery_prompt': ''}
+DISCOVERY_DEFAULTS = {'discovery_enabled': True, 'discovery_interval_hours': 24, 'discovery_prompt': '', 'discovery_use_personal_context': True}
 RECOMMENDATION_DEFAULTS = {
     'recommendation_min_preference': None,
     'recommendation_days': 0,
@@ -24,6 +25,25 @@ RECOMMENDATION_DEFAULTS = {
     'recommendation_mix_types': True,
     'recommendation_priority': 'balanced',
 }
+
+VIEW_DEFAULTS = {'read': 'unread', 'muted': 'exclude', 'saved': 'any', 'noted': 'any', 'discussed': 'any', 'origin': 'any', 'max_preference': None}
+
+
+def view_conditions(data):
+    if not isinstance(data, dict) or set(data) - set(VIEW_DEFAULTS):
+        raise ValueError('一覧のフィルターが不正です')
+    result = {**VIEW_DEFAULTS, **data}
+    choices = {'read': {'any', 'unread', 'read'}, 'muted': {'exclude', 'include', 'only'},
+               'saved': {'any', 'yes', 'no'}, 'noted': {'any', 'yes', 'no'}, 'discussed': {'any', 'yes', 'no'},
+               'origin': {'any', 'manual', 'discovery'}}
+    for key, options in choices.items():
+        if not isinstance(result[key], str) or result[key] not in options:
+            raise ValueError('一覧のフィルターが不正です: ' + key)
+    maximum = result['max_preference']
+    if maximum is not None and (type(maximum) is not int or not -100 <= maximum <= 100):
+        raise ValueError('好みの上限は-100〜100の整数か、未指定にしてください')
+    return result
+
 
 PRIORITIES = {
     'balanced': (1, .7),
@@ -89,6 +109,9 @@ class Store:
                 item_id TEXT NOT NULL REFERENCES items(id),
                 source_id INTEGER NOT NULL REFERENCES sources(id),
                 PRIMARY KEY (item_id, source_id));
+            CREATE TABLE IF NOT EXISTS discovered_items (
+                item_id TEXT PRIMARY KEY REFERENCES items(id), payload TEXT NOT NULL,
+                discovered_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS manual_tags (name TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS item_tags (
                 item_id TEXT NOT NULL REFERENCES items(id),
@@ -117,6 +140,11 @@ class Store:
             self.db.execute("UPDATE items SET discussion_state='uncertain', discussion_error='処理中に再起動しました。会話を確認してください。自動再送はしません。' WHERE discussion_state IN ('creating','sending')")
             self.db.execute("UPDATE analyses SET status='error',error='処理中に再起動しました。再生成してください' WHERE status='processing'")
             self.db.execute("UPDATE discussion_requests SET state='uncertain' WHERE state='pending'")
+
+        # Upgrade previously separate discovery results without resetting article state.
+        previous = self.discovery_state().get('items', [])
+        if previous:
+            self.ingest_discovery(previous)
 
     @contextmanager
     def transaction(self):
@@ -198,16 +226,16 @@ class Store:
     def article_fetch_state(self, item_id, state):
         with self.transaction() as db:
             item = self.item(item_id)
-            if item['content_origin'] != 'manual':
-                raise ValueError('直接追加した記事だけ本文を取得できます')
+            if item['content_origin'] not in {'manual', 'discovery'}:
+                raise ValueError('個別追加・おすすめの記事だけ本文を取得できます')
             db.execute('UPDATE items SET fetch_state=? WHERE id=?', (state, item_id))
 
     def save_article_content(self, item_id, fields):
         # Read inside the transaction so a concurrent memo/rating/edit is kept.
         with self.transaction() as db:
             item = self.item(item_id)
-            if item['content_origin'] != 'manual':
-                raise ValueError('直接追加した記事だけ本文を更新できます')
+            if item['content_origin'] not in {'manual', 'discovery'}:
+                raise ValueError('個別追加・おすすめの記事だけ本文を更新できます')
             title = fields.get('title') if item['title'] == item['url'] else item['title']
             title = title or item['title']
             summary = item['summary'] or fields.get('summary', '')
@@ -297,6 +325,8 @@ class Store:
             item['tags'] = [r[0] for r in self.db.execute('SELECT tag_name FROM item_tags WHERE item_id=? ORDER BY tag_name', (item_id,))]
             item["sources"] = [dict(r) for r in self.db.execute(
                 "SELECT s.id,s.name FROM sources s JOIN item_sources x ON x.source_id=s.id WHERE x.item_id=? ORDER BY s.id", (item_id,))]
+            found = self.db.execute('SELECT payload FROM discovered_items WHERE item_id=?', (item_id,)).fetchone()
+            item['discovery'] = json.loads(found[0]) if found else None
             item['publisher_label'] = publication_label(item)
             item.update(self.preference(item))
             item['analysis'] = self.analysis(item_id)
@@ -332,6 +362,169 @@ class Store:
             if not deleted:
                 raise KeyError('タグが見つかりません')
 
+    def custom_filters(self):
+        with self.lock:
+            rows = self.db.execute("SELECT value FROM metadata WHERE key LIKE 'custom-filter:%' ORDER BY key").fetchall()
+            order_row = self.db.execute("SELECT value FROM metadata WHERE key='custom-filter-order'").fetchone()
+        records = [{**json.loads(row[0]), 'conditions': view_conditions(json.loads(row[0]).get('conditions', {}))} for row in rows]
+        order = json.loads(order_row[0]) if order_row else []
+        positions = {value: index for index, value in enumerate(order)}
+        return sorted(records, key=lambda record: positions.get(record['id'], len(order)))
+
+    def reorder_custom_filters(self, ids):
+        if not isinstance(ids, list) or len(ids) > 109 or any(not isinstance(value, str) for value in ids) or len(set(ids)) != len(ids):
+            raise ValueError('タブの並び順が不正です')
+        with self.transaction() as db:
+            if set(ids) != {record['id'] for record in self.custom_filters()}:
+                raise ValueError('項目が別の画面で変更されています。再読み込みして並べ替えてください')
+            db.execute("INSERT OR REPLACE INTO metadata VALUES ('custom-filter-order',?)", (json.dumps(ids),))
+            return self.custom_filters()
+
+    def custom_filter(self, filter_id):
+        with self.lock:
+            row = self.db.execute("SELECT value FROM metadata WHERE key=?", ('custom-filter:' + filter_id,)).fetchone()
+        if not row:
+            raise KeyError('カスタム項目が見つかりません。再読み込みしてください')
+        result = json.loads(row[0])
+        result['conditions'] = view_conditions(result.get('conditions', {}))
+        return result
+
+    @staticmethod
+    def classification_values(data):
+        result = {}
+        for key, options, maximum in [('kinds', SOURCE_KINDS, len(SOURCE_KINDS)), ('topics', TOPICS, len(TOPICS)), ('tags', None, 20)]:
+            values = data.get(key, [])
+            if not isinstance(values, list) or len(values) > maximum or any(not isinstance(v, str) or (options is not None and v not in options) for v in values):
+                raise ValueError('カスタム条件の選択が不正です: ' + key)
+            result[key] = list(dict.fromkeys(tag_name(v) if key == 'tags' else v for v in values))
+        for key, maximum in [('source', 100), ('search', 200)]:
+            value = data.get(key, '')
+            if not isinstance(value, str) or len(value) > maximum:
+                raise ValueError('カスタム条件の文字列が不正です: ' + key)
+            result[key] = value
+        result['sort'] = data.get('sort', 'updated')
+        if not isinstance(result['sort'], str) or result['sort'] not in {'updated', 'published', 'preference', 'recommended', 'read_at', 'manual_added_at'}:
+            raise ValueError('未対応の並び順です')
+        return result
+
+    def default_custom_classification(self):
+        with self.lock:
+            row = self.db.execute("SELECT value FROM metadata WHERE key='custom-default-classification'").fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_custom_classification(self, data):
+        keys = {'id', 'kinds', 'topics', 'tags', 'source', 'search', 'sort'}
+        if not isinstance(data, dict) or set(data) != keys or not isinstance(data['id'], str):
+            raise ValueError('分類条件をすべて指定してください')
+        values = self.classification_values(data)
+        with self.transaction() as db:
+            record = None
+            if data['id']:
+                # Preserve the latest name and recommendation settings from other clients.
+                record = self.save_custom_filter({**self.custom_filter(data['id']), **values})
+            else:
+                db.execute("INSERT OR REPLACE INTO metadata VALUES ('custom-default-classification',?)", (json.dumps(values, ensure_ascii=False),))
+        return {'classification': values, 'filter': record}
+
+    def save_custom_filter(self, data):
+        import uuid
+        allowed = {'id', 'name', 'recommendations', 'kinds', 'topics', 'tags', 'source', 'search', 'sort', 'conditions'}
+        if not isinstance(data, dict) or set(data) - allowed:
+            raise ValueError('未対応のカスタム条件です')
+        name = data.get('name')
+        if not isinstance(name, str) or not name.strip() or len(name) > 80:
+            raise ValueError('項目名は1〜80文字で入力してください')
+        recommendations = data.get('recommendations')
+        if not isinstance(recommendations, dict) or set(recommendations) != set(RECOMMENDATION_DEFAULTS):
+            raise ValueError('カスタム条件をすべて指定してください')
+        for key, value in recommendations.items():
+            if key == 'recommendation_min_preference':
+                valid = value is None or type(value) is int and -100 <= value <= 100
+            elif key == 'recommendation_days':
+                valid = type(value) is int and 0 <= value <= 365
+            elif key == 'recommendation_priority':
+                valid = isinstance(value, str) and value in PRIORITIES
+            else:
+                valid = type(value) is bool
+            if not valid:
+                raise ValueError('カスタム条件の値が不正です: ' + key)
+        previous_conditions = self.custom_filter(data['id'])['conditions'] if 'conditions' not in data and isinstance(data.get('id'), str) else {}
+        conditions = view_conditions(data.get('conditions', previous_conditions))
+        minimum = recommendations['recommendation_min_preference']
+        if minimum is not None and conditions['max_preference'] is not None and minimum > conditions['max_preference']:
+            raise ValueError('好みの上限は下限以上にしてください')
+        result = {'name': name.strip(), 'recommendations': recommendations, 'conditions': conditions, **self.classification_values(data)}
+        with self.transaction() as db:
+            if 'id' in data:
+                if not isinstance(data['id'], str):
+                    raise ValueError('項目IDが不正です')
+                self.custom_filter(data['id'])
+                result['id'] = data['id']
+            else:
+                if sum(not record['id'].startswith('preset-') for record in self.custom_filters()) >= 100:
+                    raise ValueError('カスタム項目は100件までです')
+                result['id'] = uuid.uuid4().hex
+            order = [record['id'] for record in self.custom_filters()]
+            if result['id'] not in order:
+                order.append(result['id'])
+            db.execute('INSERT OR REPLACE INTO metadata VALUES (?,?)', ('custom-filter:' + result['id'], json.dumps(result, ensure_ascii=False)))
+            db.execute("INSERT OR REPLACE INTO metadata VALUES ('custom-filter-order',?)", (json.dumps(order),))
+        return result
+
+    def ensure_custom_views(self):
+        with self.transaction() as db:
+            if db.execute("SELECT 1 FROM metadata WHERE key='custom-views-v1'").fetchone():
+                return self.custom_filters()
+            existing = self.custom_filters()
+            definitions = [
+                ('recommended', 'カスタム', {}, 'updated'),
+                ('discovery', 'おすすめ', {'origin': 'discovery'}, 'updated'),
+                ('all', 'すべて', {'read': 'any', 'muted': 'include'}, 'updated'),
+                ('manual', '個別追加', {'read': 'any', 'origin': 'manual'}, 'manual_added_at'),
+                ('saved', 'ブックマーク', {'read': 'any', 'saved': 'yes'}, 'updated'),
+                ('notes', 'メモ', {'read': 'any', 'noted': 'yes'}, 'updated'),
+                ('read', '読了', {'read': 'read'}, 'read_at'),
+                ('discussed', '議論した記事', {'read': 'any', 'discussed': 'yes'}, 'updated'),
+                ('muted', 'スキップ', {'read': 'any', 'muted': 'only'}, 'updated'),
+            ]
+            ids = []
+            for key, name, conditions, sort in definitions:
+                classification = self.classification_values({})
+                recommendations = dict(RECOMMENDATION_DEFAULTS)
+                if key == 'recommended':
+                    classification = self.default_custom_classification() or classification
+                    recommendations = {k: self.settings()[k] for k in RECOMMENDATION_DEFAULTS}
+                record = {'id': 'preset-' + key, 'name': name, **classification, 'sort': classification['sort'] if key == 'recommended' else sort,
+                          'conditions': view_conditions(conditions), 'recommendations': recommendations}
+                db.execute('INSERT OR IGNORE INTO metadata VALUES (?,?)', ('custom-filter:' + record['id'], json.dumps(record, ensure_ascii=False)))
+                ids.append(record['id'])
+            order = ids[:1] + [record['id'] for record in existing] + ids[1:]
+            db.execute("INSERT OR REPLACE INTO metadata VALUES ('custom-filter-order',?)", (json.dumps(order),))
+            db.execute("INSERT INTO metadata VALUES ('custom-views-v1','1')")
+            return self.custom_filters()
+
+    def rename_custom_view(self, filter_id, name):
+        if not isinstance(filter_id, str):
+            raise ValueError('一覧IDが不正です')
+        with self.transaction():
+            return self.save_custom_filter({**self.custom_filter(filter_id), 'name': name})
+
+    def save_view(self, data):
+        allowed = {'id', 'conditions', 'recommendations', 'kinds', 'topics', 'tags', 'source', 'search', 'sort'}
+        if not isinstance(data, dict) or set(data) != allowed or not isinstance(data['id'], str):
+            raise ValueError('一覧のフィルターをすべて指定してください')
+        with self.transaction():
+            return self.save_custom_filter({**self.custom_filter(data['id']), **data})
+
+    def delete_custom_filter(self, filter_id):
+        if not isinstance(filter_id, str):
+            raise ValueError('項目IDが不正です')
+        with self.transaction() as db:
+            self.custom_filter(filter_id)
+            db.execute('DELETE FROM metadata WHERE key=?', ('custom-filter:' + filter_id,))
+            order = [record['id'] for record in self.custom_filters()]
+            db.execute("INSERT OR REPLACE INTO metadata VALUES ('custom-filter-order',?)", (json.dumps(order),))
+
     def settings(self):
         with self.lock:
             row = self.db.execute("SELECT value FROM metadata WHERE key='settings'").fetchone()
@@ -349,8 +542,9 @@ class Store:
             raise ValueError('好みの下限は-100〜100の整数か、未指定にしてください')
         if 'discovery_prompt' in data and (not isinstance(data['discovery_prompt'], str) or len(data['discovery_prompt']) > 2000):
             raise ValueError('検索プロンプトは2000文字以内の文字列です')
-        if 'discovery_enabled' in data and type(data['discovery_enabled']) is not bool:
-            raise ValueError('discovery_enabledはbooleanです')
+        for key in ['discovery_enabled', 'discovery_use_personal_context']:
+            if key in data and type(data[key]) is not bool:
+                raise ValueError(key + 'はbooleanです')
         if 'discovery_interval_hours' in data and (type(data['discovery_interval_hours']) is not int or not 6 <= data['discovery_interval_hours'] <= 168):
             raise ValueError('探索間隔は6〜168時間です')
         if 'show_link_previews' in data and type(data['show_link_previews']) is not bool:
@@ -413,15 +607,28 @@ class Store:
         if row is None:
             return None
         result = dict(row)
-        result['result'] = json.loads(result['result']) if result['result'] else None
+        result['result'] = present_comment(json.loads(result['result'])) if result['result'] else None
         return result
+
+    def current_analyses(self, ids):
+        if not ids:
+            return {}
+        with self.lock:
+            placeholders = ','.join('?' for _ in ids)
+            rows = {row['id']: dict(row) for row in self.db.execute(
+                'SELECT id,title,summary,content_text,content_origin FROM items WHERE id IN (' + placeholders + ')', ids)}
+            result = {}
+            for item_id in ids:
+                analysis = self.analysis(item_id)
+                result[item_id] = analysis if analysis and item_id in rows and analysis['input_hash'] == self.content_hash(rows[item_id]) else None
+            return result
 
     def save_analysis(self, item_id, input_hash, status, result=None, error=None):
         with self.transaction() as db:
             if result is None and status != 'done':
-                previous = self.analysis(item_id)
+                previous = db.execute('SELECT input_hash,result FROM analyses WHERE item_id=?', (item_id,)).fetchone()
                 if previous and previous['input_hash'] == input_hash:
-                    result = previous['result']
+                    result = json.loads(previous['result']) if previous['result'] else None
             db.execute('INSERT OR REPLACE INTO analyses VALUES (?,?,?,?,?,?)',
                        (item_id, input_hash, status, json.dumps(result, ensure_ascii=False) if result else None, error, time.time()))
 
@@ -478,8 +685,42 @@ class Store:
             row = self.db.execute("SELECT value FROM metadata WHERE key='discovery'").fetchone()
         return json.loads(row[0]) if row else {'items': [], 'updated': None, 'last_attempt': None}
 
-    def save_discovery(self, value):
+    def ingest_discovery(self, items):
         with self.transaction() as db:
+            return self._ingest_discovery(db, items)
+
+    def _ingest_discovery(self, db, items):
+        added = 0
+        for row in items:
+            try:
+                url = canonical(row['url'])
+            except (KeyError, ValueError, TypeError, AttributeError):
+                continue
+            existing = db.execute('SELECT id FROM items WHERE url=? ORDER BY fetched,id LIMIT 1', (url,)).fetchone()
+            item_id = existing['id'] if existing else hashlib.sha256(url.encode()).hexdigest()[:24]
+            title = str(row.get('title') or url)[:1000]
+            summary = str(row.get('summary') or '')[:5000]
+            published = row.get('published')
+            if type(published) not in {int, float} or not math.isfinite(published):
+                published = None
+            if not existing:
+                kind = row.get('kind', 'blog')
+                kind = kind if isinstance(kind, str) and kind in SOURCE_KINDS else 'blog'
+                db.execute("""INSERT INTO items(id,url,title,summary,published,fetched,kind,topics,content_origin,publication_name,audio_url)
+                           VALUES (?,?,?,?,?,?,?,?,'discovery',?,?)""",
+                           (item_id, url, title, summary, published, time.time(), kind,
+                            json.dumps(topics(title + ' ' + summary), ensure_ascii=False),
+                            clean(row.get('source_name')), row.get('audio_url')))
+                added += 1
+            payload = {key: row[key] for key in ['reason', 'matched_query', 'matched_topics', 'personal_reason', 'personal_sources'] if key in row}
+            db.execute('INSERT INTO discovered_items VALUES (?,?,?) ON CONFLICT(item_id) DO UPDATE SET payload=excluded.payload',
+                       (item_id, json.dumps(payload, ensure_ascii=False), time.time()))
+        return added
+
+    def save_discovery(self, value, import_items=False):
+        with self.transaction() as db:
+            if import_items:
+                self._ingest_discovery(db, value['items'])
             db.execute("INSERT OR REPLACE INTO metadata VALUES ('discovery',?)", (json.dumps(value, ensure_ascii=False),))
 
     def profile(self):
@@ -500,9 +741,20 @@ class Store:
         with self.transaction() as db:
             db.execute("UPDATE items SET rating=0,reason=''")
 
-    def list_items(self, tab="recommended", kind="", q="", source_id="", limit=100, offset=0, apply_recommendation=True, sort=None, topics=(), tags=(), kinds=()):
-        if tab not in {"recommended", "all", "saved", "notes", "discussed", "read", "manual", "muted"}:
+    def list_items(self, tab="recommended", kind="", q="", source_id="", limit=100, offset=0, apply_recommendation=True, sort=None, topics=(), tags=(), kinds=(), custom_filter="", search_query="", only_ids=None):
+        view = self.custom_filter(custom_filter) if custom_filter else None
+        conditions = view['conditions'] if view else None
+        if view:
+            kinds, topics, tags = view['kinds'], view['topics'], view['tags']
+            kind, q, source_id = "", view['search'], view['source']
+            sort = sort or view['sort']
+        if not isinstance(search_query, str) or len(search_query) > 200:
+            raise ValueError("検索語は200文字以内です")
+        q = " ".join(part for part in [q, search_query] if part)
+        if tab not in {"recommended", "discovery", "all", "saved", "notes", "discussed", "read", "manual", "muted"}:
             raise ValueError("未対応の表示です")
+        if view:
+            tab = "recommended"
         if sort is None:
             sort = 'read_at' if tab == 'read' else 'manual_added_at' if tab == 'manual' else 'updated'
         if sort not in {'updated', 'published', 'preference', 'recommended', 'read_at', 'manual_added_at'}:
@@ -513,19 +765,27 @@ class Store:
         if not isinstance(tags, (list, tuple)) or len(tags) > 20:
             raise ValueError('タグは20個以内で指定してください')
         selected_tags = {tag_name(name) for name in tags}
+        if only_ids is not None and not only_ids:
+            return {'items': [], 'total': 0}
+        args = tuple(only_ids) if only_ids is not None else ()
+        def selection(column):
+            return ' WHERE ' + column + ' IN (' + ','.join('?' for _ in args) + ')' if only_ids is not None else ''
         with self.lock:
-            save_requests = {r['item_id']: r['payload'] for r in self.db.execute('SELECT item_id,payload FROM save_requests ORDER BY created')}
-            rows = [dict(r) for r in self.db.execute("SELECT * FROM items")]
-            analyses = {r['item_id']: dict(r) for r in self.db.execute('SELECT * FROM analyses')}
+            save_requests = {r['item_id']: r['payload'] for r in self.db.execute('SELECT item_id,payload FROM save_requests' + selection('item_id') + ' ORDER BY created', args)}
+            rows = [dict(r) for r in self.db.execute('SELECT * FROM items' + selection('id'), args)]
+            discoveries = {r['item_id']: r['payload'] for r in self.db.execute('SELECT item_id,payload FROM discovered_items' + selection('item_id'), args)}
+            analyses = {r['item_id']: dict(r) for r in self.db.execute('SELECT * FROM analyses' + selection('item_id'), args)}
             item_tags = {}
-            for r in self.db.execute('SELECT item_id,tag_name FROM item_tags ORDER BY tag_name'):
+            for r in self.db.execute('SELECT item_id,tag_name FROM item_tags' + selection('item_id') + ' ORDER BY tag_name', args):
                 item_tags.setdefault(r['item_id'], []).append(r['tag_name'])
             sources = {}
-            for r in self.db.execute("SELECT x.item_id,s.id,s.name FROM item_sources x JOIN sources s ON s.id=x.source_id"):
-                sources.setdefault(r["item_id"], []).append({"id": r["id"], "name": r["name"]})
+            for r in self.db.execute('SELECT x.item_id,s.id,s.name FROM item_sources x JOIN sources s ON s.id=x.source_id' + selection('x.item_id'), args):
+                sources.setdefault(r['item_id'], []).append({'id': r['id'], 'name': r['name']})
         profile = self.profile()["topics"]
         weights = {t["name"]: t["weight"] for t in profile}
         settings = self.settings() if apply_recommendation else RECOMMENDATION_DEFAULTS
+        if view:
+            settings = view['recommendations']
         freshness_weight, preference_weight = PRIORITIES[settings['recommendation_priority']]
         now = time.time()
         result = []
@@ -535,33 +795,45 @@ class Store:
             analysis = analyses.get(item['id'])
             if analysis:
                 analysis = dict(analysis)
-                analysis['result'] = json.loads(analysis['result']) if analysis['result'] else None
+                analysis['result'] = present_comment(json.loads(analysis['result'])) if analysis['result'] else None
                 if analysis['input_hash'] != self.content_hash(item):
                     return None
             return analysis
         for item in rows:
             item['muted'] = bool(item.pop('skipped'))
-            if item['muted'] != (tab == 'muted'):
+            if conditions:
+                if conditions['muted'] == 'exclude' and item['muted'] or conditions['muted'] == 'only' and not item['muted']:
+                    continue
+                if conditions['read'] == 'unread' and item['read'] or conditions['read'] == 'read' and not item['read']:
+                    continue
+                flags = {'saved': bool(item['saved']), 'noted': bool(item['note'].strip()), 'discussed': bool(item['session_id'])}
+                if any(conditions[key] != 'any' and flags[key] != (conditions[key] == 'yes') for key in flags):
+                    continue
+                if conditions['origin'] == 'manual' and not item['manually_added'] or conditions['origin'] == 'discovery' and item['id'] not in discoveries:
+                    continue
+            elif item['muted'] != (tab == 'muted'):
                 continue
-            if tab == 'manual' and not item['manually_added']:
+            if not view and tab == 'discovery' and (item['id'] not in discoveries or item['read']):
+                continue
+            if not view and tab == 'manual' and not item['manually_added']:
                 continue
             item['tags'] = item_tags.get(item['id'], [])
             if selected_tags and not selected_tags.intersection(item['tags']):
                 continue
             if tab == 'recommended':
-                if apply_recommendation and (item['read'] or (not sources.get(item['id']) and item['content_origin'] != 'manual')):
+                if not view and apply_recommendation and (item['read'] or (not sources.get(item['id']) and item['content_origin'] not in {'manual', 'discovery'})):
                     continue
                 if settings['recommendation_days'] and date_value(item, ['updated', 'published', 'fetched']) < now - settings['recommendation_days'] * 86400:
                     continue
                 if settings['recommendation_hide_bad'] and item['rating'] == -1:
                     continue
-            if tab == "saved" and not item["saved"]:
+            if not view and tab == "saved" and not item["saved"]:
                 continue
-            if tab == 'notes' and not item['note'].strip():
+            if not view and tab == 'notes' and not item['note'].strip():
                 continue
-            if tab == 'read' and not item['read']:
+            if not view and tab == 'read' and not item['read']:
                 continue
-            if tab == "discussed" and not item["session_id"]:
+            if not view and tab == "discussed" and not item["session_id"]:
                 continue
             if (kind or kinds) and item["kind"] not in ({kind} | set(kinds)):
                 continue
@@ -585,6 +857,8 @@ class Store:
             item.update(self.preference(item, weights))
             minimum = settings['recommendation_min_preference']
             if tab == 'recommended' and minimum is not None and (not item['preference_known'] or item['preference_score'] < minimum):
+                continue
+            if conditions and conditions['max_preference'] is not None and (not item['preference_known'] or item['preference_score'] > conditions['max_preference']):
                 continue
             item["score"] = freshness_weight / (1 + age / 48) + math.tanh(preference / 3) * preference_weight - (0.6 if own_rating == -1 else 0)
             item["recommendation"] = "好み（Good／Bad）: " + "、".join(matches) if matches else "好み（Good／Bad）: 一致するGoodの話題はまだありません"
@@ -617,6 +891,7 @@ class Store:
                         result.append(group.pop(0))
         page = result[offset:offset + limit]
         for item in page:
+            item['discovery'] = json.loads(discoveries[item['id']]) if item['id'] in discoveries else None
             item['publisher_label'] = publication_label(item)
             if not q:
                 item['analysis'] = item_analysis(item)

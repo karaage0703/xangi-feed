@@ -24,11 +24,10 @@ class AutomaticEnrichmentTests(unittest.TestCase):
         self.item = self.store.list_items(tab='all')['items'][0]
         self.store.save_settings({'agent_id': 'test-agent'})
         self.host = Mock(configured=True)
-        self.host.mail_agent.return_value = ''
         self.enricher = Enricher(self.store, self.host)
 
     def test_inactive_automatic_skips_candidates_without_touching_analysis(self):
-        for mode in ['disabled', 'no-agent', 'no-host', 'zero-limit', 'stopped']:
+        for mode in ['disabled', 'no-host', 'zero-limit', 'stopped']:
             with self.subTest(mode=mode):
                 self.store.save_settings({'enabled': mode != 'disabled',
                                           'agent_id': '' if mode == 'no-agent' else 'test-agent',
@@ -51,11 +50,12 @@ class AutomaticEnrichmentTests(unittest.TestCase):
         self.assertIn(self.item['id'], self.enricher.pending)
         self.assertEqual(self.store.analysis(self.item['id'])['status'], 'pending')
 
-    def test_agent_autoconfiguration_still_precedes_candidate_selection(self):
+    def test_unassigned_agent_uses_host_default_without_borrowing_mail_settings(self):
         self.store.save_settings({'agent_id': ''})
         self.host.mail_agent.return_value = 'mail-agent'
         self.enricher.automatic()
-        self.assertEqual(self.store.settings()['agent_id'], 'mail-agent')
+        self.assertEqual(self.store.settings()['agent_id'], '')
+        self.host.mail_agent.assert_not_called()
         self.assertIn(self.item['id'], self.enricher.pending)
 
     def test_zero_automatic_limit_still_allows_explicit_enqueue(self):

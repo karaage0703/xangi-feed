@@ -130,9 +130,10 @@ class HostClient:
         with self.request('/api/agents') as response:
             return json.loads(response.read(200000)).get('agents', [])
 
-    def mail_agent(self):
-        with self.request('/api/extensions/xangi-mail/service/api/settings') as response:
-            return json.loads(response.read(200000)).get('agentId', '')
+    def default_backend(self):
+        with self.request('/api/runtime-settings') as response:
+            value = json.loads(response.read(200000))['backend']['value']
+        return {key: value.get(key, '') for key in ('backend', 'model')}
 
     def run(self, message, agent_id, timeout=300):
         local = self.local_completion(message, agent_id, timeout, max_tokens=2048)
@@ -181,6 +182,8 @@ class HostClient:
     def local_completion(self, message, agent_id, timeout, max_tokens):
         """Use the selected local model for bounded, tool-free JSON tasks."""
         import os
+        if os.environ.get('XANGI_FEED_DIRECT_LLM') != '1':
+            return None
         base = os.environ.get('LOCAL_LLM_BASE_URL', '').rstrip('/')
         if not base:
             return None

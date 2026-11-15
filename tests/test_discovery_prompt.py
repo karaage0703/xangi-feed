@@ -75,7 +75,7 @@ class SearchPromptTests(unittest.TestCase):
         response.read.return_value=json.dumps({'choices':[{'message':{'content':'{}'}}]}).encode()
         host.opener=MagicMock()
         host.opener.open.return_value.__enter__.return_value=response
-        with patch.dict(os.environ,{'LOCAL_LLM_BASE_URL':'http://127.0.0.1:8080/v1','LOCAL_LLM_API_KEY':'model-secret'}):
+        with patch.dict(os.environ,{'XANGI_FEED_DIRECT_LLM':'1','LOCAL_LLM_BASE_URL':'http://127.0.0.1:8080/v1','LOCAL_LLM_API_KEY':'model-secret'}):
             self.assertEqual(host.plan_search('instructions','chosen'),'{}')
         request=host.opener.open.call_args.args[0]
         payload=json.loads(request.data)

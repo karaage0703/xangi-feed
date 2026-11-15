@@ -27,7 +27,7 @@ class DiscoveryTests(unittest.TestCase):
         self.candidates = [{**ROW, 'id': 'candidate', 'title': 'New robot prototype', 'source_name': 'New Robot Lab', 'published': NOW-100, 'verified_at': NOW}]
         self.searcher = Mock(return_value=(self.candidates, {'feeds_checked': 1}))
         self.service = Discovery(self.store, self.host, self.fetcher, clock=lambda: NOW, searcher=self.searcher)
-        self.store.save_settings({'agent_id': 'fixture', 'enabled': False})
+        self.store.save_settings({'agent_id': 'fixture', 'enabled': False, 'discovery_use_personal_context': False})
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(self.store.close)
         self.addCleanup(self.service.close)
