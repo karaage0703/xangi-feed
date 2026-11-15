@@ -5,6 +5,7 @@ import time
 from .feeds import fetch_feed
 from .web_discovery import discover, scope, fetch_public
 from .discovery_prompt import compile_prompt, PromptError
+from .discovery_context import personalize, connect_items
 
 
 class Discovery:
@@ -24,18 +25,19 @@ class Discovery:
             settings = self.store.settings()
             excluded = {scope(s['url']) for s in self.store.sources()}
             items = [i for i in data['items'] if scope(i['feed_url']) not in excluded and scope(i['url']) not in excluded]
-            if data.get('result_prompt', '') != settings['discovery_prompt']: items = []
+            if data.get('result_prompt', '') != settings['discovery_prompt'] or data.get('result_personal', False) != settings['discovery_use_personal_context']: items = []
             if (data.get('plan') or {}).get('language') == 'ja': items = [i for i in items if i.get('language') == 'ja']
             next_run = data.get('retry_at') or (data['last_attempt'] + settings['discovery_interval_hours'] * 3600 if data['last_attempt'] else None)
-            changed = data.get('prompt', '') != settings['discovery_prompt']
+            changed = (data.get('prompt', '') != settings['discovery_prompt']
+                       or data.get('use_personal_context', False) != settings['discovery_use_personal_context'])
             error = None if changed else self.error
             plan = None if changed else data.get('plan')
             if changed: next_run = self.clock()
             if data.get('outcome') == 'running' and not self.running:
                 error = '前回の探索は再起動で中断しました。再探索します。'
                 next_run = self.clock()
-            return {**data, 'items': items, 'plan': plan, 'running': self.running, 'error': error,
-                    'prompt': settings['discovery_prompt'], 'enabled': settings['discovery_enabled'], 'interval_hours': settings['discovery_interval_hours'],
+            return {**data, 'items': items, 'plan': plan, 'context': None if changed else data.get('context'), 'running': self.running, 'error': error,
+                    'prompt': settings['discovery_prompt'], 'use_personal_context': settings['discovery_use_personal_context'], 'enabled': settings['discovery_enabled'], 'interval_hours': settings['discovery_interval_hours'],
                     'next_run': next_run if settings['discovery_enabled'] else None}
 
     def request_refresh(self):
@@ -53,33 +55,43 @@ class Discovery:
                 return False
             next_run = data.get('retry_at') or (data['last_attempt'] + settings['discovery_interval_hours'] * 3600 if data['last_attempt'] else 0)
             interrupted = data.get('outcome') == 'running'
-            changed = data.get('prompt', '') != settings['discovery_prompt']
+            changed = (data.get('prompt', '') != settings['discovery_prompt']
+                       or data.get('use_personal_context', False) != settings['discovery_use_personal_context'])
             if not force and (not settings['discovery_enabled'] or (not interrupted and not changed and self.clock() < next_run)):
                 return False
             profile = self.store.profile()['topics']
             positive = [r for r in profile if r['weight'] > 0][:12]
             negative = [r for r in profile if r['weight'] < 0][-8:]
-            if not positive and not settings['discovery_prompt'].strip():
+            if not positive and not settings['discovery_prompt'].strip() and not (settings['discovery_use_personal_context'] and self.host.configured and settings['agent_id']):
                 self.error = '検索する話題を入力するか、記事にGoodを付けてください。'
+                data.update(prompt=settings['discovery_prompt'], use_personal_context=settings['discovery_use_personal_context'],
+                            outcome='idle', error=self.error, plan=None, retry_at=None,
+                            context={'status': 'unavailable' if settings['discovery_use_personal_context'] else 'disabled',
+                                     'sources': [], 'themes': [], 'message': '自分の記録は使っていません。'})
+                self.store.save_discovery(data)
                 return False
             registered = [s['url'] for s in self.store.sources()]
-            data.update(last_attempt=self.clock(), outcome='running', error=None, retry_at=None, prompt=settings['discovery_prompt'])
+            data.update(last_attempt=self.clock(), outcome='running', error=None, retry_at=None, prompt=settings['discovery_prompt'], use_personal_context=settings['discovery_use_personal_context'])
             self.store.save_discovery(data)
             self.running, self.error = True, None
-            self.worker = threading.Thread(target=self._run, args=(positive, negative, registered, settings['discovery_prompt'], settings['agent_id']), daemon=True)
+            self.worker = threading.Thread(target=self._run, args=(positive, negative, registered, settings['discovery_prompt'], settings['agent_id'], settings['discovery_use_personal_context']), daemon=True)
             self.worker.start()
             return True
 
-    def _run(self, positive, negative, registered, instructions, agent_id):
+    def _run(self, positive, negative, registered, instructions, agent_id, use_personal_context):
         items, diagnostics = [], {}
         plan = None
+        context = {'status': 'disabled', 'sources': [], 'themes': [], 'message': '自分の記録は使っていません。'}
         outcome, error = 'failed', None
         try:
             started = time.monotonic()
             plan = compile_prompt(instructions, positive, self.host, agent_id)
+            if use_personal_context:
+                plan, context = personalize(plan, instructions, positive, self.host, agent_id)
             if not plan['queries'] and not positive:
                 raise PromptError('検索する話題を入力するか、記事にGoodを付けてください。')
             items, diagnostics = self.searcher(positive, negative, registered, fetcher=self.fetcher, now=self.clock(), stop=self.stop, budget=max(1,90-(time.monotonic()-started)), plan=plan)
+            connect_items(items, context)
             outcome = 'success' if items else 'empty' if diagnostics.get('searches_ok', 1) else 'failed'
             if outcome == 'failed':
                 error = '公開検索に接続できませんでした。15分後に再探索します。'
@@ -96,17 +108,18 @@ class Discovery:
             self.error = error
             if self.stop.is_set(): return
             previous = self.store.discovery_state()
-            changed = self.store.settings()['discovery_prompt'] != instructions
+            settings = self.store.settings()
+            changed = settings['discovery_prompt'] != instructions or settings['discovery_use_personal_context'] != use_personal_context
             rerun = self.pending_refresh or changed
             self.pending_refresh = False
             if changed:
                 previous.update(outcome='superseded', retry_at=self.clock(), error=None)
             else:
-                previous.update(outcome=outcome, error=error, plan=plan, diagnostics=diagnostics, last_finished=self.clock(),
+                previous.update(outcome=outcome, error=error, plan=plan, context=context, diagnostics=diagnostics, last_finished=self.clock(),
                                 retry_at=None if items else self.clock()+900)
                 if items:
-                    previous.update(items=items, updated=self.clock(), result_prompt=instructions)
-            self.store.save_discovery(previous)
+                    previous.update(items=items, updated=self.clock(), result_prompt=instructions, result_personal=use_personal_context)
+            self.store.save_discovery(previous, import_items=not changed and bool(items))
             if rerun: self.trigger(force=True)
 
     def start(self):

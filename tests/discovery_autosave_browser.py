@@ -43,6 +43,7 @@ def main():
                 try:
                     page.goto(f'http://127.0.0.1:{server.server_port}/')
                     page.get_by_role('button',name='おすすめ',exact=True).click()
+                    page.locator('#discovery-toggle > summary').click()
                     field=page.locator('[name=discovery_prompt]');status=page.locator('#discovery-save-message')
                     expect(field).to_be_enabled()
                     expect(page.get_by_role('button',name='保存して検索',exact=True)).to_have_count(0)
@@ -51,7 +52,7 @@ def main():
                     page.wait_for_timeout(800);assert posts==[]
                     field.dispatch_event('compositionend')
                     expect(status).to_have_text('自動保存して反映しました。')
-                    expect(page.locator('.discovery-card')).to_have_count(1)
+                    expect(page.locator('#feed .news')).to_have_count(1)
                     assert len(posts)==1
                     field.fill('日本語の');page.wait_for_timeout(100)
                     field.fill('日本語の記事');page.wait_for_timeout(100)
@@ -90,6 +91,7 @@ def main():
                     assert [p['discovery_prompt'] for p in posts[phase:]]==['日本語のみ。直近2日','日本語のみ。直近4日']
                     page.unroute('**/api/settings')
                     page.reload();page.get_by_role('button',name='おすすめ',exact=True).click()
+                    page.locator('#discovery-toggle > summary').click()
                     expect(field).to_have_value('日本語のみ。直近4日')
                     before=len(posts);interval=page.locator('[name=discovery_interval_hours]');interval.fill('1');interval.press('Tab')
                     expect(status).to_contain_text('まだ保存していません');assert len(posts)==before

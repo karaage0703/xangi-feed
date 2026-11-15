@@ -78,5 +78,6 @@ class PublicDiscoveryTests(unittest.TestCase):
                 items, _ = discover(positive, [], [], fetcher=fetch, now=NOW, plan=plan)
                 self.assertEqual(len(items), 1)
                 self.assertEqual(items[0]['matched_topics'], [])
+                self.assertEqual(items[0]['matched_query'], 'astronomy telescope')
                 items, _ = discover(positive, [], [], fetcher=fetch, now=NOW, plan={**plan, 'queries': ['unrelated']})
                 self.assertEqual(items, [])

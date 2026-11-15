@@ -86,7 +86,7 @@ class ArticleImporter:
 
     def add(self, data):
         item, created = self.store.add_article(data)
-        if item['content_origin'] == 'manual' and not item.get('content_text'):
+        if item['content_origin'] in {'manual', 'discovery'} and not item.get('content_text'):
             item = self.fetch(item['id'])
         return item, created
 
@@ -117,8 +117,8 @@ class ArticleImporter:
 
     def fetch(self, item_id):
         item = self.store.item(item_id)
-        if item['content_origin'] != 'manual':
-            raise ValueError('直接追加した記事だけ本文を再取得できます')
+        if item['content_origin'] not in {'manual', 'discovery'}:
+            raise ValueError('個別追加・おすすめの記事だけ本文を再取得できます')
         self.store.article_fetch_state(item_id, 'fetching')
         try:
             fields = parse_article((self.fetcher or fetch_feed)(item['url']), item['url'])

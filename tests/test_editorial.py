@@ -198,6 +198,7 @@ class EditorialTests(unittest.TestCase):
         self.assertEqual(cached['comment_context']['status'], 'ready')
         self.assertEqual(cached['comment_context']['sources'], [{'id': 'S1', 'path': 'projects/voice.md', 'excerpt': sources[0]['content']}])
         self.assertIn('ロボットの音声入力を試作中です。', self.host.run.call_args.args[0])
+        self.assertNotIn('projects/voice.md', self.host.run.call_args.args[0])
         self.assertEqual(self.store.profile()['good'], 0)
         self.assertEqual(self.store.item(self.item['id'])['preference_score'], 0)
 
@@ -341,7 +342,7 @@ class SSETests(unittest.TestCase):
         host.opener = Mock()
         host.opener.open.return_value.__enter__ = Mock(return_value=response)
         host.opener.open.return_value.__exit__ = Mock(return_value=False)
-        with patch.dict('os.environ', {'LOCAL_LLM_BASE_URL':'http://127.0.0.1:8080/v1','LOCAL_LLM_API_KEY':'model-secret'}):
+        with patch.dict('os.environ', {'XANGI_FEED_DIRECT_LLM':'1','LOCAL_LLM_BASE_URL':'http://127.0.0.1:8080/v1','LOCAL_LLM_API_KEY':'model-secret'}):
             self.assertEqual(host.run('prompt', 'chosen', timeout=90), '{"items":[]}')
             payload = json.loads(host.opener.open.call_args.args[0].data)
             self.assertEqual((payload['model'], payload['max_tokens']), ('chosen-model',2048))

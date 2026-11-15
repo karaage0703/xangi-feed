@@ -7,6 +7,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 
 from .recommendation import search_evidence
+from .comment_references import needs_rewrite
 
 
 def parse_results(text, expected, evidence=None):
@@ -22,11 +23,11 @@ def parse_results(text, expected, evidence=None):
     for item in values:
         if not isinstance(item, dict) or item.get('id') not in expected or item['id'] in results:
             raise ValueError('AIの解説に未知または重複した記事IDがあります')
-        for key, maximum in [('title_ja', 200), ('summary_ja', 1200), ('comment', 1000)]:
+        for key, label, maximum in [('title_ja', '見出し', 200), ('summary_ja', '要点', 1200), ('comment', 'AIコメント', 1000)]:
             if not isinstance(item.get(key), str) or not item[key].strip() or len(item[key]) > maximum:
-                raise ValueError('AIの解説の項目が不正です: ' + key)
+                raise ValueError('AIが生成した' + label + 'の形式が正しくありません。')
             if not re.search('[ぁ-んァ-ヶ一-龠]', item[key]):
-                raise ValueError('日本語の解説が必要です: ' + key)
+                raise ValueError('AIが' + label + 'を日本語で生成できませんでした。')
         refs = item.get('evidence_ids')
         allowed = set((evidence or {}).get(item['id'], []))
         if not isinstance(refs, list) or len(refs) > 3 or any(not isinstance(ref, str) or ref not in allowed for ref in refs) or len(set(refs)) != len(refs):
@@ -53,26 +54,16 @@ class Enricher:
         with self.lock:
             return {'running': self.running, 'queued': len(self.pending), 'revision': self.revision, 'error': self.error}
 
-    def configure_agent(self):
-        settings = self.store.settings()
-        if self.host.configured and not settings['agent_id']:
-            try:
-                agent_id = self.host.mail_agent()
-                if agent_id:
-                    self.store.save_settings({'agent_id': agent_id})
-            except Exception:
-                pass
-
     def enqueue(self, items, retry=False):
         settings = self.store.settings()
-        if not settings['enabled'] or not settings['agent_id'] or not self.host.configured or self.stop.is_set():
+        if not settings['enabled'] or not self.host.configured or self.stop.is_set():
             return 0
         added = 0
         with self.lock:
             for item in items:
                 current = self.store.analysis(item['id'])
                 input_hash = self.store.content_hash(item)
-                upgrade = current and current['status'] == 'done' and (current.get('result') or {}).get('comment_version') != 1
+                upgrade = current and current['status'] == 'done' and ((current.get('result') or {}).get('comment_version') != 1 or (current.get('result') or {}).get('comment_needs_rewrite'))
                 retry_due = current and current['status'] == 'error' and time.time() - current['updated'] >= 900
                 if current and current['input_hash'] == input_hash and (current['status'] == 'processing' or (not retry and not upgrade and not retry_due)):
                     continue
@@ -85,11 +76,10 @@ class Enricher:
         return added
 
     def automatic(self):
-        self.configure_agent()
         settings = self.store.settings()
         # Avoid ranking/loading candidates that enqueue cannot use. Agent setup
         # still runs first so an available default agent can enable this pass.
-        if (not settings['enabled'] or not settings['agent_id'] or not self.host.configured
+        if (not settings['enabled'] or not self.host.configured
                 or self.stop.is_set() or settings['automatic_limit'] == 0):
             return
         # A strict display threshold must not prevent unseen articles receiving
@@ -151,6 +141,10 @@ class Enricher:
             '確認できるのは提供されたテキストの範囲だけです。字幕・文字起こしには認識誤りがあり、省略部分・動画音声本編・査読状況は未確認です。ない事実や自分で確認したという主張を作らないでください。'
             '全記事について英語の見出しも自然な日本語にし、取得したテキストの要点を要約してください。'
             '各記事に日本語の推薦コメント150字以内を付けてください。関連記録がある場合は、その具体的な作業や関心と記事がどう結び付くか、何に使えるかを説明してください。'
+            'コメントは記事の具体的な内容を何に使えるか、試す手順や注意点を自然な日本語で述べてください。'
+            'S1などの参照ID・ファイル名・パスや「関連記録には〜と示されている」という記録の説明は本文に入れません。参照IDはevidence_idsだけへ入れます。'
+            '関連記録は検索に一致した参考資料で、発言者や出所は未確認です。AIの提案・自動処理・引用を含み得るため、本人の希望・予定・経験・判断と断定しないでください。'
+            '記録から使い道の候補を考え、例えば「勉強会の題材を探すなら、手順を短い実演にして紹介できそうです」のように用途と条件を述べます。記事と関係が薄ければ使わないでください。'
             '根拠のない人物像や好みを推測せず、単なる賛辞は避け、条件や限界も記事に即して述べてください。'
             '関連記録が空・未取得の場合は、個人向けの推薦理由を作らず、記事内容に基づく使い道や注意点をコメントしてください。'
             '関心度・重要度の採点はしないでください。evidence_idsには実際にコメントへ使った、その記事に渡された関連記録のIDだけを入れてください。使わなければ空配列にしてください。'
@@ -159,11 +153,14 @@ class Enricher:
             + '\n記事データ: ' + json.dumps([{'id': i['id'], 'title': i['title'], 'excerpt': (i.get('content_text') or i['summary'])[:9000],
                                                   'kind': i['kind'], 'content_kind': i.get('content_kind', ''), 'origin': i.get('content_origin', 'rss'),
                                                   'sources': [s['name'] for s in i['sources']], 'evidence_status': context['status'],
-                                                  'related_records': sources_by_item[i['id']]} for i, context in zip(items, contexts)], ensure_ascii=False)
+                                                  'related_records': [{'id': source['id'], 'excerpt': source['excerpt']} for source in sources_by_item[i['id']]]} for i, context in zip(items, contexts)], ensure_ascii=False)
         )
         try:
             allowed = {item_id: [source['id'] for source in sources] for item_id, sources in sources_by_item.items()}
             results = parse_results(self.host.run(prompt, settings['agent_id'], timeout=settings['timeout_seconds']), {i['id'] for i in items}, allowed)
+            for item_id, result in results.items():
+                if needs_rewrite(result, sources_by_item[item_id]):
+                    raise ValueError('コメントに参照番号や記録ファイル名が含まれています。記事の使い道が分かる文章で作り直してください')
             for (item_id, input_hash), context in zip(batch, contexts):
                 if input_hash == self.store.content_hash(self.store.item(item_id)):
                     result = results[item_id]
