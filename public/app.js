@@ -97,11 +97,13 @@ function articleLink(item, label, url = item.url) {
   return control;
 }
 async function recordArticleOpen(item) {
+  const version = loadVersion, view = activeCustomFilter;
   try {
     const result = await api(`api/items/${item.id}/open`, {}, true);
     if (!result.marked_read) return;
     applyItem(item, result.item);
-    if (activeCustomFilter) await load();
+    if (version !== loadVersion || view !== activeCustomFilter) return;
+    if (activeCustomFilter) { retainedForReading.add(item.id); patchReaction(item); }
     else if (['recommended', 'discovery'].includes(state.tab)) {
       const index = state.items.findIndex(current => current.id === item.id);
       if (index >= 0) { state.items.splice(index, 1); state.total = Math.max(0, state.total - 1); }
@@ -449,14 +451,16 @@ async function selectCustomFilter(selected) {
     customFilters = latest.filters; defaultCustomClassification = latest.default_classification;
     const item = customFilters.find(item => item.id === selected);
     if (selected && !item) throw new Error('この項目は削除されています。項目を再読み込みしてください。');
-    if (selected !== activeCustomFilter) { $('#search').value = ''; $('#search-clear').hidden = true; }
+    const changed = selected !== activeCustomFilter;
+    if (changed) { $('#search').value = ''; $('#search-clear').hidden = true; }
     activeCustomFilter = selected;
     await setViewTab('recommended', false, false);
     if (item) applyCustomFilter(item);
     else { $('#custom-filter-name').value = ''; await loadRecommendations(); }
     $('#custom-filter-message').textContent = ''; $('#recommendation-message').textContent = '';
-    await load();
+    const loaded = await load();
     if (classificationMobile.matches && $('#classification-dialog').open) $('#classification-dialog').close();
+    if (changed && loaded) window.scrollTo({top: 0, left: 0, behavior: 'instant'});
   } catch (error) { $('#custom-filter-message').textContent = error.message; $('#custom-filter-retry').hidden = false; }
   finally {
     customFilterBusy = false; renderCustomFilters();
@@ -504,6 +508,7 @@ function restoreReadingAnchor(anchor) {
   if (row) { const delta = row.getBoundingClientRect().top - anchor.top; if (Math.abs(delta) > 0.5) scrollBy(0, delta); }
 }
 const pendingReactions = new Set();
+const retainedForReading = new Set();
 function patchReaction(item, busy = pendingReactions.has(item.id)) {
   const row = [...$('#feed').children].find(row => row.dataset.id === item.id);
   const detail = $('#detail').open && $('#detail').dataset.id === item.id ? $('#detail-body') : null;
@@ -528,9 +533,10 @@ async function react(item, data) {
     const updated = await api(`api/items/${item.id}/react?` + params, data);
     Object.assign(item, updated);
     const visible = state.items.find(current => current.id === item.id); if (visible && visible !== item) Object.assign(visible, updated);
-    if (view !== activeCustomFilter || version !== loadVersion) { if (visible) void load(); return; }
-    if (typeof updated.view_matches !== 'boolean') { await load(false, true); return; }
-    if (!updated.view_matches && visible) {
+    if (view !== activeCustomFilter || version !== loadVersion) { if (visible) void load(false, true, true); return; }
+    if ('read' in data || 'muted' in data) retainedForReading.add(item.id);
+    if (typeof updated.view_matches !== 'boolean') { await load(false, true, true); return; }
+    if (!updated.view_matches && visible && !retainedForReading.has(item.id)) {
       const anchor = captureReadingAnchor(item.id), index = state.items.indexOf(visible), row = [...$('#feed').children].find(row => row.dataset.id === item.id);
       state.items.splice(index, 1); state.total = Math.max(0, state.total - 1); row?.remove();
       if (!state.items.length) render();
@@ -571,8 +577,7 @@ async function reactAndReload(item, data) {
       visible.preference_known = own !== 0 || visible.topics.some(topic => weights.has(topic));
     }
   }
-  if (activeCustomFilter) await load(false, true);
-  else if ('muted' in data || (['recommended', 'discovery'].includes(state.tab) && 'read' in data) || (state.tab === 'read' && 'read' in data)) {
+  if (!activeCustomFilter && ('muted' in data || (['recommended', 'discovery'].includes(state.tab) && 'read' in data) || (state.tab === 'read' && 'read' in data))) {
     const remove = 'muted' in data ? item.muted !== (state.tab === 'muted') : ['recommended', 'discovery'].includes(state.tab) ? !!item.read : !item.read;
     if (remove && visibleItem) {
       state.items = state.items.filter(i => i.id !== item.id); state.total = Math.max(0, state.total - 1);
@@ -631,14 +636,12 @@ async function skipScrolledItem(row, item) {
   try {
     const updated = await api(`api/items/${item.id}/react`, { muted: true });
     Object.assign(item, updated);
-    // Retain the DOM and focus while scrolling; exclude persisted mutes from pagination.
+    // Keep both the item and its DOM so Good and later renders remain available.
     if (version === loadVersion && row.isConnected) {
-      state.items = state.items.filter(current => current.id !== item.id);
-      state.total = Math.max(0, state.total - 1);
+      retainedForReading.add(item.id);
       row.querySelector('.article-mute')?.replaceWith(muteControl(item));
       row.dataset.scrollSkipped = 'true';
-      $('#result-count').textContent = `${state.total}件`;
-      $('#more').hidden = state.items.length >= state.total;
+      updateResultCount();
     }
   } catch (error) { notice('スクロールでのスキップを保存できませんでした。' + error.message); }
   finally { scrollSkipPending.delete(item.id); }
@@ -956,6 +959,7 @@ function commentBubble(item, result) {
   if (result?.comment_version === 1 && result.comment) {
     bubble.append(el('p', 'ai-comment-text', result.comment));
     const basis = sources.length ? '関連する記録を参考にしたコメント' :
+      context.status === 'article_only' ? '関連する記録を利用できず・記事内容に基づくコメント' :
       context.status === 'empty' ? '関連する記録なし・記事内容に基づくコメント' :
       ['error', 'unavailable'].includes(context.status) ? '関連する記録を取得できず・記事内容に基づくコメント' :
       '記事内容に基づくコメント（関連する記録は未参照）';
@@ -1174,7 +1178,7 @@ function manualTagNodes(item) {
 async function changeManualTag(item, operation, name) {
   try {
     const updated = await api(`api/items/${item.id}/tags`, { [operation]: name });
-    applyItem(item, updated); await loadTagOptions(); await load();
+    applyItem(item, updated); await loadTagOptions(); await load(false, true, true);
     if ($('#detail').open) { renderDetail(item); $('#manual-tag-input').focus(); }
   } catch (e) { const status = $('#tag-message'); if (status) status.textContent = e.message; else notice(e.message); }
 }
@@ -1289,7 +1293,7 @@ function showDiscoveryPanel() {
   $('#discovery-panel').hidden = !discovery;
 
 }
-async function load(more = false, preservePosition = false) {
+async function load(more = false, preservePosition = false, retainCurrent = false) {
   showDiscoveryPanel();
   saveClassification();
   if (more && state.loading) return;
@@ -1307,15 +1311,23 @@ async function load(more = false, preservePosition = false) {
       await loadDiscovery();
       if (version !== loadVersion) return;
     }
-    const params = new URLSearchParams({ tab: state.tab, source: $('#source').value, q: $('#saved-search').value, search: $('#search').value, sort: $('#sort').value, limit: 50, offset: more ? state.items.length : 0 });
+    const params = new URLSearchParams({ tab: state.tab, source: $('#source').value, q: $('#saved-search').value, search: $('#search').value, sort: $('#sort').value, limit: 50, offset: 0 });
+    if (more) for (const item of state.items) params.append('exclude_id', item.id);
     if (state.tab === 'recommended' && activeCustomFilter) params.set('custom_filter', activeCustomFilter);
     for (const kind of state.selectedKinds) params.append('kind', kind);
     for (const topic of state.selectedTopics) params.append('topic', topic);
     for (const tag of state.selectedTags) params.append('tag', tag);
     const result = await api('api/items?' + params);
     if (version !== loadVersion) return;
-    state.items = more ? [...state.items, ...result.items.filter(i => !state.items.some(x => x.id === i.id))] : result.items; state.total = result.total;
+    const previousCount = state.items.length;
+    if (more) state.items = [...state.items, ...result.items.filter(i => !state.items.some(x => x.id === i.id))];
+    else if (retainCurrent && previousCount) {
+      const updates = new Map(result.items.map(item => [item.id, item]));
+      state.items = state.items.map(item => updates.get(item.id) || item);
+    } else { retainedForReading.clear(); state.items = result.items; }
+    state.total = more ? previousCount + result.total : retainCurrent ? Math.max(previousCount, result.total) : result.total;
     render(more || preservePosition); updateSelections(); $('#new-items').hidden = true;
+    return true;
   } catch (e) { if (version === loadVersion) notice(e.message); } finally { if (version === loadVersion) { state.loading = false; $('#more').disabled = false; $('#feed').setAttribute('aria-busy', 'false'); } }
 }
 async function loadSources() {
@@ -1588,7 +1600,7 @@ async function poll() {
     if (isDiscoveryView()) {
       const previous = state.discoveryUpdated;
       const current = await loadDiscovery();
-      if (current && current.updated !== previous) await load();
+      if (current && current.updated !== previous) await load(false, true, true);
     }
     const health = await api('api/health'); state.available = health.discussion_available;
     if (showLinkPreviews !== health.show_link_previews) {
@@ -1601,14 +1613,14 @@ async function poll() {
     if (state.polled && status.last_finished !== state.lastFinished) {
       await loadSources();
       if (status.added) { $('#new-items').textContent = `新着${status.added}件を表示`; $('#new-items').hidden = false; }
-      if (state.refreshPending || !state.items.length) { state.refreshPending = false; await load(); }
+      if (state.refreshPending || !state.items.length) { const manual = state.refreshPending; state.refreshPending = false; await load(false, !manual, !manual); }
       const failed = state.sources.filter(s => s.enabled && s.error);
       if (failed.length) notice(`${failed.length}件の配信元で取得に失敗しました。「設定」で確認できます。`);
     }
     state.lastFinished = status.last_finished;
     state.polled = true;
     if (state.saveRevision !== undefined && health.save_revision !== state.saveRevision) {
-      notionMessages.clear(); await load();
+      notionMessages.clear(); await load(false, true, true);
       if ($('#detail').open) await openDetail({id: $('#detail').dataset.id});
     }
     state.saveRevision = health.save_revision;

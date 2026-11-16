@@ -32,6 +32,10 @@ def main():
                     page = context.new_page()
                     errors = []
                     page.on('pageerror', lambda error: errors.append(str(error)))
+                    def choose(view):
+                        if width < 901: page.locator('#classification-open').click()
+                        page.locator(f'button[data-custom-filter="preset-{view}"]').click()
+                        page.wait_for_function('() => !state.loading && !customFilterBusy')
                     page.goto(f'http://127.0.0.1:{server.server_port}')
                     expect(page.locator('.news')).to_have_count(50)
                     row = page.locator('.news').first
@@ -80,27 +84,28 @@ def main():
                     expect(page.locator('#more')).to_be_hidden()
                     remaining = {r['id'] for r in store.list_items(tab='recommended', limit=100)['items']}
                     shown = set(page.locator('.news').evaluate_all('rows => rows.map(row => row.dataset.id)'))
-                    assert shown == remaining, (len(shown), len(remaining))
+                    assert shown == set(ids), (len(shown), len(ids))
                     # Returning to the top (upward scroll) must not mute unseen rows.
                     muted_before = {item_id for item_id in ids if store.item(item_id)['muted']}
                     top()
                     assert {item_id for item_id in ids if store.item(item_id)['muted']} == muted_before
                     page.reload()
                     expect(page.locator(f'article[data-id="{first}"]')).to_have_count(0)
-                    page.locator('[data-tab=muted]').click()
+                    choose('muted')
                     restored = page.locator(f'article[data-id="{first}"]')
                     expect(restored).to_be_visible()
                     restored.locator('.mute-control').click()
-                    expect(restored).to_have_count(0)
+                    expect(restored).to_have_count(1)
+                    expect(restored.locator('.mute-control')).to_have_attribute('aria-pressed', 'false')
                     assert not store.item(first)['muted']
-                    page.locator('[data-tab=all]').click()
+                    choose('all')
                     expect(page.locator('#feed')).to_have_attribute('aria-busy', 'false')
                     expect(page.locator('.news').first).to_be_visible()
                     # Saved and read items are protected, even in the all view.
                     protected = page.locator('.news').first.get_attribute('data-id')
                     store.react(protected, {'saved': True})
                     page.reload()
-                    page.locator('[data-tab=all]').click()
+                    choose('all')
                     expect(page.locator('#feed')).to_have_attribute('aria-busy', 'false')
                     protected_row = page.locator(f'article[data-id="{protected}"]')
                     view(protected_row)
@@ -108,7 +113,7 @@ def main():
                     assert not store.item(protected)['muted']
                     store.react(protected, {'saved': False, 'read': True})
                     page.reload()
-                    page.locator('[data-tab=all]').click()
+                    choose('all')
                     expect(page.locator('#feed')).to_have_attribute('aria-busy', 'false')
                     view(protected_row)
                     pass_row(protected_row)
@@ -125,7 +130,7 @@ def main():
                     page.locator('#settings-close').click()
                     # Failed writes leave persistence and pagination intact; no retry storm.
                     top()
-                    candidate = next(i for i in page.locator('.news').evaluate_all('rows => rows.map(row => row.dataset.id)') if i != protected)
+                    candidate = next(i for i in page.locator('.news').evaluate_all('rows => rows.map(row => row.dataset.id)') if i != protected and not any(store.item(i)[key] for key in ['muted', 'read', 'saved']))
                     target = page.locator(f'article[data-id="{candidate}"]')
                     failures = []
                     endpoint = f'**/api/items/{candidate}/react'

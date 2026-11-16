@@ -30,6 +30,23 @@ class SavedViewTests(unittest.TestCase):
     def titles(self,record):
         return {item['title'] for item in self.store.list_items(custom_filter=record['id'])['items']}
 
+    def test_paging_excludes_displayed_cards_after_their_membership_changes(self):
+        record = self.view()
+        first = self.store.list_items(custom_filter=record['id'], limit=2)['items']
+        seen = [item['id'] for item in first]
+        self.store.react(seen[0], {'read': True})
+        self.store.react(seen[1], {'muted': True})
+        expected = self.store.list_items(custom_filter=record['id'])
+        result = self.store.list_items(custom_filter=record['id'], exclude_ids=seen)
+        self.assertEqual(result['total'], expected['total'])
+        self.assertEqual([item['id'] for item in result['items']], [item['id'] for item in expected['items']])
+        self.assertTrue(set(seen).isdisjoint(item['id'] for item in result['items']))
+        all_view = self.view({'read': 'any', 'muted': 'include'})
+        result = self.store.list_items(custom_filter=all_view['id'], exclude_ids=seen, limit=2)
+        self.assertEqual(result['total'], len(self.items) - 2)
+        self.assertEqual(len(result['items']), 2)
+        self.assertTrue(set(seen).isdisjoint(item['id'] for item in result['items']))
+
     def test_seeded_presets_are_real_editable_views_and_migrate_once(self):
         old=self.view();before=dict(old)
         self.store.save_custom_classification({'id':'','kinds':['podcast'],'topics':[],'tags':[],'source':'','search':'old filter','sort':'preference'})
