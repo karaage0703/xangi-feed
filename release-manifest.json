@@ -99,7 +99,7 @@
     "tests/test_youtube_transcript.py": "767faef31566deb15ca3d0fa0667bbdd0562d5ec13288f62b83e5895a21d81cf",
     "tests/top_controls_pwa_browser.py": "202b04abb187a201bed28ec0f5359023f156cc4b101f52b35bdabad14d12bce7",
     "tests/views_browser.py": "699536256f688743b1d99c2bd98989107a9c700daac8b17dbc1e95dba8740a70",
-    "uv.lock": "097602afc48c4f3b2e95b9dbfac33a5009e7ddb5288cdee232f6e7d696f845f5",
+    "uv.lock": "ab35121d3cf664755356e727979f9abc67093734bbc2b89be918b299d1a723eb",
     "xangi-extension.json": "74df38662f16d12e418a83b7b177b54257daf847f396229fbe544f347dafba7f",
     "xangi_feed/__init__.py": "b8d674e9ecf1b4d3ae6d0c469110e1415752f4b9de204b89f2325a426e9d56c3",
     "xangi_feed/adapters/README.md": "38fe2a6dff4b9a1a9820b17d68dabcc316349e5e54c4c59861f44702088c6a0f",
