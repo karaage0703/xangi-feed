@@ -741,7 +741,7 @@ class Store:
         with self.transaction() as db:
             db.execute("UPDATE items SET rating=0,reason=''")
 
-    def list_items(self, tab="recommended", kind="", q="", source_id="", limit=100, offset=0, apply_recommendation=True, sort=None, topics=(), tags=(), kinds=(), custom_filter="", search_query="", only_ids=None):
+    def list_items(self, tab="recommended", kind="", q="", source_id="", limit=100, offset=0, apply_recommendation=True, sort=None, topics=(), tags=(), kinds=(), custom_filter="", search_query="", only_ids=None, exclude_ids=()):
         view = self.custom_filter(custom_filter) if custom_filter else None
         conditions = view['conditions'] if view else None
         if view:
@@ -889,6 +889,8 @@ class Store:
                 for group in groups.values():
                     if group:
                         result.append(group.pop(0))
+        excluded = set(exclude_ids)
+        result = [item for item in result if item['id'] not in excluded]
         page = result[offset:offset + limit]
         for item in page:
             item['discovery'] = json.loads(discoveries[item['id']]) if item['id'] in discoveries else None

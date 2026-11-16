@@ -65,6 +65,96 @@ class EditorialTests(unittest.TestCase):
         self.assertEqual(self.enricher.enqueue([self.item], retry=True), 0)
         self.host.run.assert_not_called()
 
+    def test_extra_json_data_is_regenerated_once(self):
+        valid = self.host.run.return_value
+        self.host.run.side_effect = [valid + '\n追加の説明', valid]
+        self.enricher.process([(self.item['id'], self.store.content_hash(self.item))])
+        self.assertEqual(self.store.analysis(self.item['id'])['status'], 'done')
+        self.assertEqual(self.host.run.call_count, 2)
+        self.assertIn('JSON文書を1つだけ', self.host.run.call_args.args[0])
+        self.assertLessEqual(self.host.run.call_args.kwargs['timeout'], 300)
+
+    def test_repeated_malformed_json_has_readable_error(self):
+        self.host.run.return_value += '\n追加の説明'
+        self.enricher.process([(self.item['id'], self.store.content_hash(self.item))])
+        analysis = self.store.analysis(self.item['id'])
+        self.assertEqual(analysis['status'], 'error')
+        self.assertIsNone(analysis['result'])
+        self.assertIn('AIの応答形式', analysis['error'])
+        self.assertNotIn('Extra data', analysis['error'])
+        self.assertEqual(self.host.run.call_count, 2)
+
+    def test_json_retry_keeps_original_deadline(self):
+        self.store.save_settings({'timeout_seconds': 45})
+        self.host.run.side_effect = [self.host.run.return_value + '{}', self.host.run.return_value]
+        with patch('xangi_feed.enrichment.time.monotonic', side_effect=[100, 130]):
+            self.enricher.process([(self.item['id'], self.store.content_hash(self.item))])
+        self.assertEqual(self.host.run.call_args.kwargs['timeout'], 15)
+        self.assertEqual(self.store.analysis(self.item['id'])['status'], 'done')
+
+    def test_exhausted_deadline_does_not_retry_json(self):
+        self.store.save_settings({'timeout_seconds': 45})
+        self.host.run.return_value += '{}'
+        with patch('xangi_feed.enrichment.time.monotonic', side_effect=[100, 146]):
+            self.enricher.process([(self.item['id'], self.store.content_hash(self.item))])
+        self.assertEqual(self.host.run.call_count, 1)
+        self.assertIn('制限時間', self.store.analysis(self.item['id'])['error'])
+
+    def test_invalid_article_id_is_regenerated_without_accepting_it(self):
+        self.host.run.side_effect = [json.dumps([result('unknown')]), self.host.run.return_value]
+        self.enricher.process([(self.item['id'], self.store.content_hash(self.item))])
+        self.assertEqual(self.host.run.call_count, 2)
+        self.assertEqual(self.store.analysis(self.item['id'])['status'], 'done')
+
+    def test_repeated_invalid_article_id_is_still_rejected(self):
+        self.host.run.return_value = json.dumps([result('unknown')])
+        self.enricher.process([(self.item['id'], self.store.content_hash(self.item))])
+        self.assertEqual(self.host.run.call_count, 2)
+        self.assertEqual(self.store.analysis(self.item['id'])['status'], 'error')
+
+    def test_reply_suggestions_after_json_do_not_require_regeneration(self):
+        self.host.run.return_value += '<xangi_reply_suggestions>["続きを教えて"]</xangi_reply_suggestions>'
+        self.enricher.process([(self.item['id'], self.store.content_hash(self.item))])
+        self.assertEqual(self.host.run.call_count, 1)
+        self.assertEqual(self.store.analysis(self.item['id'])['status'], 'done')
+
+    def test_complete_reply_suggestion_suffix_with_or_without_fence(self):
+        item_id = self.item['id']
+        document = json.dumps([result(item_id)])
+        suffix = '<xangi_reply_suggestions>["引用: </xangi_reply_suggestions>","次へ"]</xangi_reply_suggestions>'
+        for body in [document, '```json\n' + document + '\n```']:
+            for separator in ['', '\n\n']:
+                with self.subTest(body=body, separator=separator):
+                    self.assertIn(item_id, parse_results(body + separator + suffix, {item_id}))
+
+    def test_other_trailing_data_is_not_discarded(self):
+        item_id = self.item['id']
+        document = json.dumps([result(item_id)])
+        for suffix in ['{}', '\n説明文', '<xangi_reply_suggestions>["次へ"]',
+                       '<xangi_reply_suggestions>{}</xangi_reply_suggestions>',
+                       '<xangi_reply_suggestions>[1]</xangi_reply_suggestions>',
+                       '<xangi_reply_suggestions>["次へ"]</xangi_reply_suggestions>追加']:
+            with self.subTest(suffix=suffix), self.assertRaises(json.JSONDecodeError):
+                parse_results(document + suffix, {item_id})
+
+    def test_suggestion_marker_inside_editorial_text_is_preserved(self):
+        item_id = self.item['id']
+        value = {**result(item_id), 'summary_ja': 'タグ<xangi_reply_suggestions>は本文の引用です。'}
+        parsed = parse_results(json.dumps([value]), {item_id})
+        self.assertEqual(parsed[item_id]['summary_ja'], value['summary_ja'])
+
+    def test_original_latin_title_is_valid_with_japanese_summary_and_comment(self):
+        item_id = self.item['id']
+        for original, generated in [('PixelOS', 'PixelOS'), ('ØX - Cooler Spark', 'ØX ― Cooler Spark')]:
+            with self.subTest(original=original):
+                parsed = parse_results(json.dumps([{**result(item_id), 'title_ja': generated}]),
+                                       {item_id}, titles={item_id: original})
+                self.assertEqual(parsed[item_id]['title_ja'], generated)
+        for key in ['title_ja', 'summary_ja', 'comment']:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                parse_results(json.dumps([{**result(item_id), key: 'Unrelated English text'}]),
+                              {item_id}, titles={item_id: 'PixelOS'})
+
 
     def test_content_change_during_generation_is_not_committed_as_current(self):
         def run(*_):
@@ -210,6 +300,43 @@ class EditorialTests(unittest.TestCase):
         self.assertEqual(cached['comment_context']['sources'], [])
         self.assertTrue(cached['comment'])
         self.assertNotIn('secret-upstream-detail', self.host.run.call_args.args[0])
+
+    def test_context_containing_other_article_is_removed_on_validation_retry(self):
+        source = {'file_path': 'projects/context.md', 'content': '参考記録に別の記事ID other-article と解説JSONが混在しています。'}
+        self.host.request.side_effect = lambda *args, **kwargs: io.BytesIO(json.dumps({'results': [source]}).encode())
+        valid = result(self.item['id'])
+        self.host.run.side_effect = [json.dumps([valid, result('other-article')]), json.dumps([valid])]
+        self.enricher.process([(self.item['id'], self.store.content_hash(self.item))])
+        cached = self.store.analysis(self.item['id'])
+        self.assertEqual(cached['status'], 'done')
+        self.assertEqual(self.host.run.call_count, 2)
+        retry = self.host.run.call_args.args[0]
+        self.assertNotIn(source['content'], retry)
+        self.assertIn('"related_records": []', retry)
+        self.assertIn(self.item['id'], retry)
+        self.assertEqual(cached['result']['comment_context']['status'], 'article_only')
+        self.assertFalse(cached['result']['comment_context']['degraded'])
+        self.assertEqual(cached['result']['comment_context']['sources'], [])
+        self.assertIn('記事本文だけ', cached['result']['comment_context']['message'])
+
+    def test_reference_validation_retry_does_not_accept_removed_evidence(self):
+        source = {'file_path': 'projects/context.md', 'content': '関連記録です。'}
+        self.host.request.side_effect = lambda *args, **kwargs: io.BytesIO(json.dumps({'results': [source]}).encode())
+        self.host.run.side_effect = [json.dumps([{**result(self.item['id']), 'evidence_ids': ['S9']}]),
+                                     json.dumps([{**result(self.item['id']), 'evidence_ids': ['S1']}])]
+        self.enricher.process([(self.item['id'], self.store.content_hash(self.item))])
+        self.assertEqual(self.store.analysis(self.item['id'])['status'], 'error')
+        self.assertEqual(self.host.run.call_count, 2)
+
+    def test_json_syntax_retry_preserves_valid_evidence(self):
+        source = {'file_path': 'projects/context.md', 'content': '関連記録です。'}
+        self.host.request.side_effect = lambda *args, **kwargs: io.BytesIO(json.dumps({'results': [source]}).encode())
+        self.host.run.side_effect = ['not JSON', json.dumps([{**result(self.item['id']), 'evidence_ids': ['S1']}])]
+        self.enricher.process([(self.item['id'], self.store.content_hash(self.item))])
+        cached = self.store.analysis(self.item['id'])
+        self.assertEqual(cached['status'], 'done')
+        self.assertEqual(cached['result']['evidence_ids'], ['S1'])
+        self.assertFalse(cached['result']['comment_context']['degraded'])
 
     def test_unknown_cross_article_or_duplicate_citations_are_rejected(self):
         item_id = self.item['id']

@@ -1,5 +1,6 @@
 """Native links with default auto-read, opt-out, persistence and failure handling."""
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -24,7 +25,7 @@ def main():
         try:
             checks=[]
             with sync_playwright() as p:
-                browser=p.chromium.launch(headless=True)
+                browser=p.chromium.launch(headless=True,executable_path=os.environ.get("CHROMIUM_EXECUTABLE"))
                 for label,width in [('desktop',1280),('iphone-pwa-model',393),('small-pwa-model',360)]:
                     store.save_settings({'mark_read_on_open':True})
                     store.react(a,{'read':False});store.react(b,{'read':False})
@@ -35,6 +36,10 @@ def main():
                     page.on('pageerror',lambda error:errors.append(str(error)))
                     page.on('request',lambda request:requests.append(request.url) if request.url.endswith('/open') else None)
                     page.goto(origin);expect(page.locator('.news')).to_have_count(2)
+                    def choose(view):
+                        if width<901:page.locator('#classification-open').click()
+                        page.locator(f'button[data-custom-filter="preset-{view}"]').click()
+                        page.wait_for_function('() => !state.loading && !customFilterBusy')
                     original=page.url
                     def open_link(locator):
                         with page.expect_response(lambda r:r.url.endswith('/open')) as response:
@@ -43,12 +48,13 @@ def main():
                         opened.value.close();return response.value
                     row=page.locator(f'.news[data-id="{a}"]')
                     assert open_link(row.locator('.news-title')).status==200
-                    expect(row).to_have_count(0)
+                    expect(row).to_have_count(1)
+                    expect(row.locator('.read-control')).to_have_attribute('aria-pressed','true')
                     assert store.item(a)['read']
                     expect(page.locator('#notice')).to_contain_text('読了にしました')
-                    page.get_by_role('button',name='読了',exact=True).click()
+                    choose('read')
                     expect(page.locator('.news')).to_have_count(1)
-                    page.get_by_role('button',name='すべて',exact=True).click()
+                    choose('all')
                     def save_policy(enabled):
                         page.locator('#settings-open').click()
                         field=page.locator('#reading-form [name=mark_read_on_open]')
@@ -63,22 +69,22 @@ def main():
                     expect(page.locator('#reading-form [name=mark_read_on_open]')).not_to_be_checked()
                     page.locator('#reading-form').screenshot(path=str(output/f'{label}-option-off.png'))
                     page.locator('#settings-close').click()
-                    page.get_by_role('button',name='すべて',exact=True).click()
+                    choose('all')
                     video=page.locator(f'.news[data-id="{b}"]')
                     assert open_link(video.locator('.news-title')).status==200
                     assert not store.item(b)['read']
-                    video.locator('.more-actions summary').click();video.locator('.read-control').click()
-                    expect(video.locator('.read-control')).to_contain_text('未視聴に戻す')
+                    video.locator('.read-control').click()
+                    expect(video.locator('.read-control')).to_have_attribute('aria-pressed','true');expect(video.locator('.read-control')).to_be_enabled()
                     assert store.item(b)['read']
                     store.react(b,{'read':False})
-                    save_policy(True);page.reload();page.get_by_role('button',name='すべて',exact=True).click()
+                    save_policy(True);page.reload();choose('all')
                     video.locator('.more-actions summary').click();video.get_by_role('button',name='記事の詳細',exact=True).click()
                     expect(page.locator('#detail')).to_be_visible();assert not store.item(b)['read']
                     page.locator('#article-note').fill('まだ保存していないメモ')
                     assert open_link(page.locator('#detail-body').get_by_role('link',name='YouTubeで見る',exact=True)).status==200
                     expect(page.locator('#article-note')).to_have_value('まだ保存していないメモ')
                     assert store.item(b)['read'];page.locator('#detail-close').click()
-                    store.react(a,{'read':False});page.reload();page.get_by_role('button',name='すべて',exact=True).click()
+                    store.react(a,{'read':False});page.reload();choose('all')
                     row=page.locator(f'.news[data-id="{a}"]');row.locator('.more-actions summary').click()
                     row.get_by_role('button',name='リンクを共有・コピー',exact=True).click()
                     before=len(requests);page.locator('#article-link-copy').click()
@@ -86,7 +92,7 @@ def main():
                     assert len(requests)==before and not store.item(a)['read']
                     assert open_link(page.locator('#article-link-open')).status==200
                     expect(page.locator('#notice')).to_contain_text('読了にしました');assert store.item(a)['read']
-                    store.react(a,{'read':False});page.reload();page.get_by_role('button',name='すべて',exact=True).click()
+                    store.react(a,{'read':False});page.reload();choose('all')
                     row=page.locator(f'.news[data-id="{a}"]');row.locator('.more-actions summary').click()
                     assert open_link(row.get_by_role('link',name='音声を聴く',exact=True)).status==200
                     expect(page.locator('#notice')).to_contain_text('読了にしました');assert store.item(a)['read']

@@ -134,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
                 one = lambda key, default="": query.get(key, [default])[0]
                 limit = max(1, min(100, int(one("limit", "50"))))
                 offset = max(0, int(one("offset", "0")))
-                result = store.list_items(one("tab", "recommended"), one("kind"), one("q")[:200], one("source"), limit, offset, sort=one('sort') or None, topics=query.get('topic', []), tags=query.get('tag', []), kinds=query.get('kind', []), custom_filter=one('custom_filter'), search_query=one('search')[:200])
+                result = store.list_items(one("tab", "recommended"), one("kind"), one("q")[:200], one("source"), limit, offset, sort=one('sort') or None, topics=query.get('topic', []), tags=query.get('tag', []), kinds=query.get('kind', []), custom_filter=one('custom_filter'), search_query=one('search')[:200], exclude_ids=query.get('exclude_id', []))
                 cached = self.server.previews.cached_for(result['items'])
                 for item in result['items']:
                     if item['id'] in cached: item['link_preview'] = cached[item['id']]

@@ -81,9 +81,9 @@ def main():
                     anchor_y=row.bounding_box()['y'];page.route('**/api/items/*/react?*',lambda route:route.fulfill(status=503,content_type='application/json',body='{"error":"fixture save failure"}'))
                     bookmark.click();expect(bookmark).to_have_attribute('aria-pressed','true');expect(bookmark).to_be_enabled();assert store.item(target_id)['saved'];assert abs(row.bounding_box()['y']-anchor_y)<2
                     page.unroute('**/api/items/*/react?*')
-                    # Unread filter removes only the confirmed row; loaded paging is not reset.
+                    # Read cards remain available for Good until explicit navigation.
                     select(unread);expect(page.locator('.news')).to_have_count(50);first=page.locator('.news').first;removed=first.get_attribute('data-id');n=len(lists)
-                    first.locator('.read-control').click();expect(page.locator(f'.news[data-id="{removed}"]')).to_have_count(0);expect(page.locator('.news')).to_have_count(49);assert len(lists)==n
+                    first.locator('.read-control').click();expect(first.locator('.read-control')).to_have_attribute('aria-pressed','true');expect(first.locator('.read-control')).to_be_enabled();expect(page.locator(f'.news[data-id="{removed}"]')).to_have_count(1);expect(page.locator('.news')).to_have_count(50);assert len(lists)==n
                     select(saved);expect(page.locator('.news')).to_have_count(1);page.locator('.bookmark-control').click();expect(page.locator('.news')).to_have_count(0);expect(page.locator('#feed')).to_contain_text('条件に合う記事がありません')
                     # The existing settings option really disables previews and survives reload.
                     select(any_view);page.locator('#settings-open').click();expect(page.locator('#settings')).to_be_visible();page.locator('#preview-form [name=show_link_previews]').uncheck();page.locator('#preview-form').get_by_role('button',name='リンクカードの設定を保存').click()
