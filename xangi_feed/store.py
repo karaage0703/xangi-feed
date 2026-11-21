@@ -314,7 +314,7 @@ class Store:
         return {'preference_score': score,
                 'preference_known': own != 0 or any(topic in weights for topic in item['topics'])}
 
-    def item(self, item_id):
+    def item(self, item_id, weights=None):
         with self.lock:
             row = self.db.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
             if row is None:
@@ -328,7 +328,7 @@ class Store:
             found = self.db.execute('SELECT payload FROM discovered_items WHERE item_id=?', (item_id,)).fetchone()
             item['discovery'] = json.loads(found[0]) if found else None
             item['publisher_label'] = publication_label(item)
-            item.update(self.preference(item))
+            item.update(self.preference(item, weights))
             item['analysis'] = self.analysis(item_id)
             item['save_request'] = self.save_request(item_id)
             if item['analysis'] and item['analysis']['input_hash'] != self.content_hash(item):
@@ -650,7 +650,6 @@ class Store:
             return {'item': self.item(item_id), 'marked_read': marked}
 
     def react(self, item_id, data):
-        self.item(item_id)
         if data.keys() - {'rating', 'saved', 'read', 'reason', 'muted'}:
             raise ValueError('未対応の評価項目です')
         values = {}
@@ -666,8 +665,10 @@ class Store:
         if not values:
             raise ValueError("更新する評価がありません")
         with self.transaction() as db:
+            current = db.execute('SELECT read FROM items WHERE id=?', (item_id,)).fetchone()
+            if current is None:
+                raise KeyError("記事が見つかりません")
             if 'read' in values:
-                current = self.item(item_id)
                 if not values['read']:
                     values['read_at'] = None
                 elif not current['read']:
@@ -675,10 +676,10 @@ class Store:
             db.execute("UPDATE items SET " + ",".join(f"{k}=?" for k in values) + " WHERE id=?", (*values.values(), item_id))
             if "rating" in values and values["rating"] != -1:
                 db.execute("UPDATE items SET reason='' WHERE id=?", (item_id,))
-        item = self.item(item_id)
-        if {'rating', 'reason'} & values.keys():
-            item['preference_weights'] = self.profile()['topics']
-        return item
+            profile = self.profile()['topics']
+            item = self.item(item_id, weights={t['name']: t['weight'] for t in profile})
+            item['preference_weights'] = profile
+            return item
 
     def discovery_state(self):
         with self.lock:
@@ -741,13 +742,14 @@ class Store:
         with self.transaction() as db:
             db.execute("UPDATE items SET rating=0,reason=''")
 
-    def list_items(self, tab="recommended", kind="", q="", source_id="", limit=100, offset=0, apply_recommendation=True, sort=None, topics=(), tags=(), kinds=(), custom_filter="", search_query="", only_ids=None, exclude_ids=()):
+    def list_items(self, tab="recommended", kind="", q="", source_id="", limit=100, offset=0, apply_recommendation=True, sort=None, topics=(), tags=(), kinds=(), custom_filter="", search_query="", only_ids=None, exclude_ids=(), preference_topics=None, sidebar_source="", source_ids_only=False):
         view = self.custom_filter(custom_filter) if custom_filter else None
         conditions = view['conditions'] if view else None
         if view:
             kinds, topics, tags = view['kinds'], view['topics'], view['tags']
             kind, q, source_id = "", view['search'], view['source']
             sort = sort or view['sort']
+        source_filters = {value for value in (source_id, sidebar_source) if value}
         if not isinstance(search_query, str) or len(search_query) > 200:
             raise ValueError("検索語は200文字以内です")
         q = " ".join(part for part in [q, search_query] if part)
@@ -766,7 +768,7 @@ class Store:
             raise ValueError('タグは20個以内で指定してください')
         selected_tags = {tag_name(name) for name in tags}
         if only_ids is not None and not only_ids:
-            return {'items': [], 'total': 0}
+            return {'source_ids': []} if source_ids_only else {'items': [], 'total': 0}
         args = tuple(only_ids) if only_ids is not None else ()
         def selection(column):
             return ' WHERE ' + column + ' IN (' + ','.join('?' for _ in args) + ')' if only_ids is not None else ''
@@ -781,7 +783,7 @@ class Store:
             sources = {}
             for r in self.db.execute('SELECT x.item_id,s.id,s.name FROM item_sources x JOIN sources s ON s.id=x.source_id' + selection('x.item_id'), args):
                 sources.setdefault(r['item_id'], []).append({'id': r['id'], 'name': r['name']})
-        profile = self.profile()["topics"]
+        profile = self.profile()["topics"] if preference_topics is None else preference_topics
         weights = {t["name"]: t["weight"] for t in profile}
         settings = self.settings() if apply_recommendation else RECOMMENDATION_DEFAULTS
         if view:
@@ -789,6 +791,7 @@ class Store:
         freshness_weight, preference_weight = PRIORITIES[settings['recommendation_priority']]
         now = time.time()
         result = []
+        matching_sources = set()
         def date_value(item, keys):
             return next((item[k] for k in keys if item[k] is not None), 0)
         def item_analysis(item):
@@ -838,7 +841,7 @@ class Store:
             if (kind or kinds) and item["kind"] not in ({kind} | set(kinds)):
                 continue
             item["sources"] = sources.get(item["id"], [])
-            if source_id and not any(str(s["id"]) == source_id for s in item["sources"]):
+            if source_filters and not source_filters.issubset(str(source["id"]) for source in item["sources"]):
                 continue
             # Search still includes current analysis results before pagination.
             if q:
@@ -860,9 +863,15 @@ class Store:
                 continue
             if conditions and conditions['max_preference'] is not None and (not item['preference_known'] or item['preference_score'] > conditions['max_preference']):
                 continue
+            if source_ids_only:
+                matching_sources.update(source['id'] for source in item['sources'])
+                continue
             item["score"] = freshness_weight / (1 + age / 48) + math.tanh(preference / 3) * preference_weight - (0.6 if own_rating == -1 else 0)
             item["recommendation"] = "好み（Good／Bad）: " + "、".join(matches) if matches else "好み（Good／Bad）: 一致するGoodの話題はまだありません"
             result.append(item)
+        if source_ids_only:
+            return {'source_ids': sorted(matching_sources)}
+
         def order(item):
             updated = date_value(item, ['updated', 'published', 'fetched'])
             primary = updated
@@ -878,7 +887,7 @@ class Store:
                 return item['read_at'] is not None, item['read_at'] or 0, updated, item['fetched'], item['id']
             return primary, updated, item['fetched'], item['id']
         result.sort(key=order, reverse=True)
-        if tab == 'recommended' and sort == 'recommended' and settings['recommendation_mix_types'] and not kind and not kinds and not source_id:
+        if tab == 'recommended' and sort == 'recommended' and settings['recommendation_mix_types'] and not kind and not kinds and not source_filters:
             # Balance categories before slicing: an arXiv batch must not occupy
             # every visible row. New tab remains a strict chronological view.
             groups = {k: [] for k in ['tech', 'blog', 'podcast', 'paper', 'video', 'news', 'comic', 'rss']}

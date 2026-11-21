@@ -148,8 +148,16 @@ $('#article-link-share').addEventListener('click', async () => {
   } catch (error) { $('#article-link-message').textContent = error.name === 'AbortError' ? '共有をキャンセルしました。' : '共有できませんでした。URLのコピーも使えます。'; }
 });
 let customFilters = [], activeCustomFilter = '', customFilterBusy = false;
+let sidebarSource = null;
+const viewRssMenus = new Map();
+
 function currentView() { return customFilters.find(item => item.id === activeCustomFilter); }
-function isDiscoveryView() { return currentView()?.conditions.origin === 'discovery'; }
+function isDiscoveryView() { return state.tab === 'recommended' && currentView()?.conditions.origin === 'discovery'; }
+function readingTitle() {
+  const view = currentView()?.name || '一覧';
+  if (!sidebarSource) return view;
+  return state.tab === 'recommended' ? view + ' / ' + sidebarSource.name : sidebarSource.name;
+}
 function viewConditions() {
   const form = $('#view-state-form');
   return Object.fromEntries(['read', 'muted', 'saved', 'noted', 'discussed', 'origin'].map(key => [key, form.elements[key].value]).concat([
@@ -185,7 +193,11 @@ function persistCustomClassification() {
     setViewSaveMessage('フィルターをサーバに保存中…');
     try {
       const result = await api('api/views/save', {id, ...values});
-      if (id) customFilters = customFilters.map(item => item.id === id ? result.filter : item);
+      if (id) {
+        customFilters = customFilters.map(item => item.id === id ? result.filter : item);
+        const menu = viewRssMenus.get(id);
+        if (menu && !menu.hidden) void loadViewRss(id, menu);
+      }
       else defaultCustomClassification = result.classification;
       setViewSaveMessage('フィルターをサーバに保存しました。');
       if (!$('#classification-save-retry').hidden) notice('');
@@ -213,7 +225,7 @@ function recommendationData() {
 }
 let draggedCustomFilter = '', pointerViewDrag = null;
 function clearViewDrag() {
-  for (const row of $('#custom-filter-tabs').children) { row.classList.remove('is-dragging'); delete row.dataset.dropPosition; }
+  for (const row of $('#custom-filter-tabs').querySelectorAll('.view-row')) { row.classList.remove('is-dragging'); delete row.dataset.dropPosition; }
 }
 function markViewDrop(row, y) {
   clearViewDrag();
@@ -252,12 +264,16 @@ function startViewPointer(event, id) {
 }
 function renderCustomFilters() {
   const disabled = customFilterBusy || $('#recommendation-fields').disabled;
-  const currentFocus = document.activeElement?.dataset.customFilter;
+  const classification = $('#custom-filter-tabs');
+  const focused = document.activeElement;
+  const currentFocus = focused?.dataset.customFilter;
+  const focusedToggle = focused?.dataset.viewRssToggle;
+  const hasRssSources = state.sources.some(source => source.adapter === 'rss');
   const tabs = customFilters.map(item => {
     const tab = button(item.name, () => selectCustomFilter(item.id));
     tab.dataset.customFilter = item.id; tab.title = item.name;
     if (item.id.startsWith('preset-')) tab.dataset.tab = item.id.slice(7);
-    tab.setAttribute('aria-pressed', state.tab === 'recommended' && activeCustomFilter === item.id);
+    tab.setAttribute('aria-pressed', state.tab === 'recommended' && activeCustomFilter === item.id && !sidebarSource);
     tab.disabled = disabled; tab.draggable = !disabled;
     const more = button('…', () => openViewSettings(item.id));
     more.className = 'view-settings-button'; more.disabled = disabled; more.setAttribute('aria-label', item.name + 'の設定'); more.title = item.name + 'の設定';
@@ -276,11 +292,41 @@ function renderCustomFilters() {
     row.addEventListener('dragend', () => { draggedCustomFilter = ''; clearViewDrag(); });
     row.addEventListener('dragover', event => { if (draggedCustomFilter && !customFilterBusy) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; markViewDrop(row, event.clientY); } });
     row.addEventListener('drop', event => { event.preventDefault(); const id = draggedCustomFilter, target = markViewDrop(row, event.clientY); draggedCustomFilter = ''; clearViewDrag(); dropView(id, target); });
-    row.append(handle, tab, more); return row;
+    row.append(handle, tab);
+    const group = el('div', 'view-group');
+    group.append(row);
+    if (hasRssSources) {
+      const menu = viewRssMenus.get(item.id) || el('div', 'rss-links view-rss-links');
+      if (!viewRssMenus.has(item.id)) {
+        menu.id = 'view-rss-' + item.id;
+        menu.hidden = true;
+        viewRssMenus.set(item.id, menu);
+      }
+      const toggle = el('button', 'view-rss-toggle');
+      toggle.type = 'button'; toggle.dataset.viewRssToggle = item.id;
+      toggle.setAttribute('aria-label', item.name + 'のRSS配信元');
+      toggle.setAttribute('aria-controls', menu.id);
+      toggle.setAttribute('aria-expanded', String(!menu.hidden));
+      toggle.addEventListener('click', () => {
+        menu.hidden = !menu.hidden;
+        toggle.setAttribute('aria-expanded', String(!menu.hidden));
+        if (!menu.hidden) void loadViewRss(item.id, menu);
+      });
+      row.append(toggle);
+      group.append(menu);
+    }
+    row.append(more);
+    return group;
   });
-  $('#custom-filter-tabs').replaceChildren(...tabs);
+  for (const id of viewRssMenus.keys()) {
+    if (!customFilters.some(view => view.id === id)) viewRssMenus.delete(id);
+  }
+  classification.replaceChildren(...tabs);
+  updateRssSelection();
+  if (focusedToggle) classification.querySelector(`[data-view-rss-toggle="${focusedToggle}"]`)?.focus({preventScroll: true});
+  if (focused?.dataset.rssSource && classification.contains(focused)) focused.focus({preventScroll: true});
   if (currentFocus) $('#custom-filter-tabs').querySelector(`[data-custom-filter="${currentFocus}"]`)?.focus({preventScroll: true});
-  $('#current-view-title').textContent = currentView()?.name || '一覧';
+  $('#current-view-title').textContent = readingTitle();
   $('#view-settings-title').textContent = (currentView()?.name || '一覧') + 'の設定';
   $('#custom-filter-plus').disabled = disabled;
   $('#custom-filter-controls').disabled = disabled;
@@ -367,7 +413,7 @@ async function writeCustomFilter(update) {
     const data = {name: $('#custom-filter-name').value, recommendations: recommendationData(), kinds: [...state.selectedKinds], topics: [...state.selectedTopics], tags: [...state.selectedTags], source: $('#source').value, search: $('#saved-search').value, sort: $('#sort').value, conditions: viewConditions()};
     if (update) data.id = activeCustomFilter;
     const saved = await api('api/custom-filters', data);
-    activeCustomFilter = saved.id;
+    activeCustomFilter = saved.id; sidebarSource = null;
     if (!update) { $('#search').value = ''; $('#search-clear').hidden = true; }
     customFilters = customFilters.some(item => item.id === saved.id)
       ? customFilters.map(item => item.id === saved.id ? saved : item)
@@ -407,14 +453,14 @@ $('#custom-filter-new-form').addEventListener('submit', async event => {
 });
 async function openViewSettings(id) {
   if (!id) return;
-  if (id !== activeCustomFilter) await selectCustomFilter(id);
-  if (id !== activeCustomFilter) return;
+  if (id !== activeCustomFilter || state.tab !== 'recommended') await selectCustomFilter(id);
+  if (id !== activeCustomFilter || state.tab !== 'recommended') return;
   if ($('#classification-dialog').open) $('#classification-dialog').close();
   $('#view-meta-group').open = true;
   if (!$('#view-settings').open) $('#view-settings').showModal();
 }
 function openFilters(section = 'types') {
-  if (!activeCustomFilter) return;
+  if (!activeCustomFilter || state.tab !== 'recommended') return;
   if ($('#classification-dialog').open) $('#classification-dialog').close();
   $('#filter-toggle').open = true;
   $('#view-state-group').open = section === 'conditions';
@@ -436,12 +482,13 @@ $('#custom-filter-duplicate').addEventListener('click', () => {
 });
 $('#custom-filter-update').addEventListener('click', () => writeCustomFilter(true));
 $('#custom-filter-retry').addEventListener('click', async () => { await loadCustomFilters(); await load(); });
-async function selectCustomFilter(selected) {
+async function selectCustomFilter(selected, source = null) {
   if (customFilterBusy) return;
   if (!await persistCustomClassification()) {
     if (classificationMobile.matches && $('#classification-dialog').open) $('#classification-dialog').close();
     openFilters('conditions'); return;
   }
+  if (customFilterBusy) return;
   const restoreFocus = document.activeElement?.dataset.customFilter === selected;
   customFilterBusy = true; renderCustomFilters();
   clearTimeout(recommendationTimer); ++recommendationVersion; await recommendationSave;
@@ -451,9 +498,9 @@ async function selectCustomFilter(selected) {
     customFilters = latest.filters; defaultCustomClassification = latest.default_classification;
     const item = customFilters.find(item => item.id === selected);
     if (selected && !item) throw new Error('この項目は削除されています。項目を再読み込みしてください。');
-    const changed = selected !== activeCustomFilter;
+    const changed = selected !== activeCustomFilter || state.tab !== 'recommended' || sidebarSource?.id !== source?.id;
     if (changed) { $('#search').value = ''; $('#search-clear').hidden = true; }
-    activeCustomFilter = selected;
+    activeCustomFilter = selected; sidebarSource = source;
     await setViewTab('recommended', false, false);
     if (item) applyCustomFilter(item);
     else { $('#custom-filter-name').value = ''; await loadRecommendations(); }
@@ -464,7 +511,10 @@ async function selectCustomFilter(selected) {
   } catch (error) { $('#custom-filter-message').textContent = error.message; $('#custom-filter-retry').hidden = false; }
   finally {
     customFilterBusy = false; renderCustomFilters();
-    if (restoreFocus && !classificationMobile.matches) $('#custom-filter-tabs').querySelector(`[data-custom-filter="${selected}"]`)?.focus({preventScroll: true});
+    if (!classificationMobile.matches) {
+      if (source) viewRssMenus.get(selected)?.querySelector(`[data-rss-source="${source.id}"]`)?.focus({preventScroll: true});
+      else if (restoreFocus) $('#custom-filter-tabs').querySelector(`[data-custom-filter="${selected}"]`)?.focus({preventScroll: true});
+    }
   }
 }
 $('#custom-filter-delete').addEventListener('click', async () => {
@@ -472,7 +522,7 @@ $('#custom-filter-delete').addEventListener('click', async () => {
   customFilterBusy = true; renderCustomFilters();
   try {
     await api('api/custom-filters/delete', {id: activeCustomFilter, confirm: true});
-    activeCustomFilter = ''; $('#custom-filter-name').value = '';
+    activeCustomFilter = ''; sidebarSource = null; $('#custom-filter-name').value = '';
     classificationSave = Promise.resolve(true);
     await loadCustomFilters();
     if (currentView()) applyCustomFilter(currentView());
@@ -507,8 +557,10 @@ function restoreReadingAnchor(anchor) {
   const row = anchor && [...$('#feed').children].find(row => row.dataset.id === anchor.id);
   if (row) { const delta = row.getBoundingClientRect().top - anchor.top; if (Math.abs(delta) > 0.5) scrollBy(0, delta); }
 }
-const pendingReactions = new Set();
+const pendingReactions = new Map();
 const retainedForReading = new Set();
+let reactionRevision = 0;
+let reactionWeights = null;
 function patchReaction(item, busy = pendingReactions.has(item.id)) {
   const row = [...$('#feed').children].find(row => row.dataset.id === item.id);
   const detail = $('#detail').open && $('#detail').dataset.id === item.id ? $('#detail-body') : null;
@@ -517,87 +569,99 @@ function patchReaction(item, busy = pendingReactions.has(item.id)) {
     const readLabel = item.kind === 'video' ? (item.read ? '未視聴に戻す' : '視聴済みにする') : (item.read ? '未読に戻す' : '読了にする');
     for (const control of scope.querySelectorAll('.read-control, .bookmark-control, .mute-control, .rating-control')) {
       control.disabled = busy;
+      if (control.classList.contains('rating-control')) control.setAttribute('aria-pressed', item.rating === (control.classList.contains('bad') ? -1 : 1));
       if (control.classList.contains('read-control')) { control.setAttribute('aria-pressed', !!item.read); control.title = item.title + 'を' + readLabel; control.setAttribute('aria-label', control.title); }
       if (control.classList.contains('bookmark-control')) { control.setAttribute('aria-pressed', !!item.saved); control.title = item.saved ? 'ブックマーク済み' : 'ブックマーク'; control.setAttribute('aria-label', control.title); }
       if (control.classList.contains('mute-control')) control.setAttribute('aria-pressed', !!item.muted);
     }
+    let reason = scope.querySelector('.reason');
+    if (item.rating === -1) {
+      if (!reason) { reason = reasonControl(item); scope.append(reason); }
+      reason.querySelector('select').value = item.reason;
+      reason.querySelector('select').disabled = busy;
+    } else reason?.remove();
+  }
+}
+function applyPreferenceWeights(topics) {
+  reactionWeights = topics;
+  const weights = new Map(topics.map(row => [row.name, row.weight]));
+  for (const visible of state.items) {
+    const own = ['duplicate', 'summary'].includes(visible.reason) ? 0 : visible.rating;
+    const score = visible.topics.reduce((sum, topic) => sum + Math.max(-3, Math.min(3, weights.get(topic) || 0)), own);
+    const known = own !== 0 || visible.topics.some(topic => weights.has(topic));
+    if (score === visible.preference_score && known === visible.preference_known) continue;
+    visible.preference_score = score; visible.preference_known = known;
+    const row = [...$('#feed').children].find(row => row.dataset.id === visible.id);
+    row?.querySelector('.preference-score')?.replaceWith(preferenceLabel(visible));
   }
 }
 async function react(item, data) {
   if (pendingReactions.has(item.id)) return;
-  if (!activeCustomFilter || Object.keys(data).some(key => !['saved', 'read', 'muted'].includes(key))) return reactAndReload(item, data);
-  const view = activeCustomFilter, version = loadVersion, previous = Object.fromEntries(Object.keys(data).map(key => [key, item[key]]));
-  const params = new URLSearchParams({custom_filter: view, search: $('#search').value});
-  pendingReactions.add(item.id); Object.assign(item, data); patchReaction(item);
+  const tab = state.tab, view = tab === 'recommended' ? activeCustomFilter : '';
+  const source = sidebarSource?.id, version = loadVersion;
+  const stillCurrent = () => tab === state.tab && (!view || view === activeCustomFilter) &&
+    source === sidebarSource?.id && version === loadVersion;
+  const optimistic = {...data};
+  if ('rating' in data && data.rating !== -1) optimistic.reason = '';
+  const previous = Object.fromEntries(Object.keys(optimistic).map(key => [key, item[key]]));
+  const params = new URLSearchParams({search: $('#search').value});
+  if (view) {
+    params.set('custom_filter', view);
+    if (source) params.set('sidebar_source', source);
+  }
+  const syncItem = update => {
+    Object.assign(item, update);
+    const visible = state.items.find(current => current.id === item.id);
+    if (visible && visible !== item) Object.assign(visible, update);
+    if (detailItem?.id === item.id && detailItem !== item) Object.assign(detailItem, update);
+    return visible;
+  };
+  pendingReactions.set(item.id, {optimistic});
+  syncItem(optimistic); patchReaction(item);
+  let saved = false;
   try {
     const updated = await api(`api/items/${item.id}/react?` + params, data);
-    Object.assign(item, updated);
-    const visible = state.items.find(current => current.id === item.id); if (visible && visible !== item) Object.assign(visible, updated);
-    if (view !== activeCustomFilter || version !== loadVersion) { if (visible) void load(false, true, true); return; }
-    if ('read' in data || 'muted' in data) retainedForReading.add(item.id);
-    if (typeof updated.view_matches !== 'boolean') { await load(false, true, true); return; }
-    if (!updated.view_matches && visible && !retainedForReading.has(item.id)) {
-      const anchor = captureReadingAnchor(item.id), index = state.items.indexOf(visible), row = [...$('#feed').children].find(row => row.dataset.id === item.id);
+    saved = true; ++reactionRevision;
+    const visible = syncItem(updated);
+    if (updated.preference_weights) applyPreferenceWeights(updated.preference_weights);
+    // A response from another view must not remove rows or move focus here.
+    if (!stillCurrent()) return;
+    if (view && ('read' in data || 'muted' in data || 'rating' in data || 'reason' in data)) retainedForReading.add(item.id);
+    const remove = view ? updated.view_matches === false && !retainedForReading.has(item.id) :
+      ('muted' in data ? item.muted !== (state.tab === 'muted') :
+       'read' in data ? (['recommended', 'discovery'].includes(state.tab) ? !!item.read : state.tab === 'read' && !item.read) :
+       'saved' in data && state.tab === 'saved' && !item.saved);
+    if (remove && visible) {
+      const anchor = captureReadingAnchor(item.id), index = state.items.indexOf(visible);
+      const row = [...$('#feed').children].find(row => row.dataset.id === item.id);
       state.items.splice(index, 1); state.total = Math.max(0, state.total - 1); row?.remove();
       if (!state.items.length) render();
       else { updateResultCount(); restoreReadingAnchor(anchor); }
       if (!$('#detail').open) {
         const next = state.items[Math.min(index, state.items.length - 1)];
         const control = next && [...$('#feed').children].find(row => row.dataset.id === next.id)?.querySelector('read' in data ? '.read-control' : 'saved' in data ? '.bookmark-control' : '.mute-control');
-        (control || $('#view-filter-open')).focus({preventScroll: true});
+        (control || $('#classification-open')).focus({preventScroll: true});
       }
     }
-    $('#reading-action-message').textContent = 'saved' in data ? (item.saved ? 'ブックマークしました。' : 'ブックマークを外しました。') : 'read' in data ? (item.read ? '読了にしました。' : '未読に戻しました。') : 'スキップの状態を保存しました。';
+    if ('rating' in data || 'reason' in data) {
+      $('#new-items').textContent = '好みを反映して一覧を更新'; $('#new-items').hidden = false;
+    }
+    $('#reading-action-message').textContent = 'rating' in data || 'reason' in data ? '評価を保存しました。' : 'saved' in data ? (item.saved ? 'ブックマークしました。' : 'ブックマークを外しました。') : 'read' in data ? (item.read ? '読了にしました。' : '未読に戻しました。') : 'スキップの状態を保存しました。';
   } catch (error) {
-    Object.assign(item, previous);
-    const anchor = captureReadingAnchor(); notice('保存できませんでした。操作前の状態へ戻しました。' + error.message); restoreReadingAnchor(anchor);
+    if (!saved) {
+      syncItem(previous);
+      if (reactionWeights) applyPreferenceWeights(reactionWeights);
+      notice('保存できませんでした。操作前の状態へ戻しました。' + error.message);
+    } else notice('保存済みですが表示を更新できませんでした。一覧を更新してください。' + error.message);
   } finally {
-    pendingReactions.delete(item.id); patchReaction(item, false);
-    if (view === activeCustomFilter && version === loadVersion && document.activeElement === document.body) {
-      const row = [...$('#feed').children].find(row => row.dataset.id === item.id);
-      row?.querySelector('read' in data ? '.read-control' : 'saved' in data ? '.bookmark-control' : '.mute-control')?.focus({preventScroll: true});
+    pendingReactions.delete(item.id);
+    const anchor = captureReadingAnchor();
+    patchReaction(state.items.find(current => current.id === item.id) || item, false); restoreReadingAnchor(anchor);
+    if (stillCurrent() && document.activeElement === document.body) {
+      const scope = $('#detail').open && $('#detail').dataset.id === item.id ? $('#detail-body') : [...$('#feed').children].find(row => row.dataset.id === item.id);
+      scope?.querySelector('rating' in data ? '.rating-control' + (data.rating === -1 ? '.bad' : ':not(.bad)') : 'read' in data ? '.read-control' : 'saved' in data ? '.bookmark-control' : 'reason' in data ? '.reason select' : '.mute-control')?.focus({preventScroll: true});
     }
   }
-}
-async function reactAndReload(item, data) {
-  const active = document.activeElement;
-  const focusLabel = active?.getAttribute('aria-label');
-  const focusText = active?.textContent;
-  const inDetail = $('#detail').open;
-  const updated = await api(`api/items/${item.id}/react`, data);
-  Object.assign(item, updated);
-  const itemIndex = state.items.findIndex(i => i.id === item.id);
-  const visibleItem = state.items.find(i => i.id === item.id);
-  if (visibleItem && visibleItem !== item) Object.assign(visibleItem, updated);
-  if (updated.preference_weights) {
-    const weights = new Map(updated.preference_weights.map(row => [row.name, row.weight]));
-    for (const visible of state.items) {
-      const own = ['duplicate', 'summary'].includes(visible.reason) ? 0 : visible.rating;
-      visible.preference_score = visible.topics.reduce((sum, topic) => sum + Math.max(-3, Math.min(3, weights.get(topic) || 0)), own);
-      visible.preference_known = own !== 0 || visible.topics.some(topic => weights.has(topic));
-    }
-  }
-  if (!activeCustomFilter && ('muted' in data || (['recommended', 'discovery'].includes(state.tab) && 'read' in data) || (state.tab === 'read' && 'read' in data))) {
-    const remove = 'muted' in data ? item.muted !== (state.tab === 'muted') : ['recommended', 'discovery'].includes(state.tab) ? !!item.read : !item.read;
-    if (remove && visibleItem) {
-      state.items = state.items.filter(i => i.id !== item.id); state.total = Math.max(0, state.total - 1);
-    } else if (!remove) await load();
-  }
-  if (!activeCustomFilter && state.tab === 'recommended' && 'rating' in data && $('#recommendation-form').elements.recommendation_min_preference.value !== '') await load();
-  // Keep current ordering while reading; explicit navigation applies new ranking.
-  render();
-  if ($('#detail').open && $('#detail').dataset.id === item.id) renderDetail(item);
-  const scope = inDetail ? $('#detail') : document.querySelector(`article[data-id="${item.id}"]`);
-  const target = scope && [...scope.querySelectorAll('button,select,input,summary')].find(b => ('read' in data && b.classList.contains('read-control')) || ('muted' in data && b.classList.contains('mute-control')) || ('saved' in data && b.classList.contains('bookmark-control')) || (focusLabel ? b.getAttribute('aria-label') === focusLabel : b.textContent === focusText || ('saved' in data && ['ブックマーク', 'ブックマーク済み'].includes(b.textContent))));
-  (target || ('muted' in data ? scope?.querySelector('.more-actions>summary') : null))?.focus({ preventScroll: true });
-  if (!scope && ('read' in data || 'muted' in data) && !inDetail) {
-    const next = state.items[Math.min(itemIndex, state.items.length - 1)];
-    const nextControl = 'muted' in data ? '.mute-control' : '.read-control';
-    const fallback = 'muted' in data ? (state.tab === 'muted' ? '[data-tab="all"]' : '[data-tab="muted"]') : state.tab === 'read' ? '[data-tab="recommended"]' : '[data-tab="read"]';
-    (next ? document.querySelector(`article[data-id="${next.id}"] ${nextControl}`) : classificationMobile.matches ? $('#classification-open') : document.querySelector(fallback))?.focus({ preventScroll: true });
-  }
-  if ('read' in data) notice(item.read ? '読了にしました。選択中のフィルターに合わせて表示します。' : '未読に戻しました。元の一覧の条件に合えば再表示されます。');
-  if ('muted' in data) notice(item.muted ? 'ミュートしました。「ミュート」から確認・解除できます。' : 'ミュートを解除しました。元の状態と各一覧の条件に合わせて表示されます。');
 }
 // Observe actual visibility, without the prefetch margin used by link previews.
 const scrollSkipKey = 'xangi-feed-scroll-skip';
@@ -668,7 +732,7 @@ async function openDetail(item, target = '') {
   const opening = ++detailOpening;
   const updated = await api(`api/items/${item.id}`);
   if (opening !== detailOpening) return;
-  Object.assign(item, updated);
+  Object.assign(item, updated, pendingReactions.get(item.id)?.optimistic || {});
   renderDetail(item);
   if (!$('#detail').open) $('#detail').showModal();
   if (target === 'tags') { $('#manual-tag-input').scrollIntoView({ block: 'center' }); $('#manual-tag-input').focus({ preventScroll: true }); }
@@ -805,7 +869,7 @@ function actions(item, inDetail = false) {
     more.addEventListener('keydown', event => { if (event.key === 'Escape') { more.open = false; summary.focus(); } });
     more.addEventListener('toggle', () => { if (more.open) document.querySelectorAll('.more-actions[open]').forEach(other => { if (other !== more) other.open = false; }); });
   }
-  if (pendingReactions.has(item.id)) for (const control of group.querySelectorAll('.read-control, .bookmark-control, .rating-control')) control.disabled = true;
+  if (pendingReactions.has(item.id)) for (const control of group.querySelectorAll('.read-control, .bookmark-control, .mute-control, .rating-control')) control.disabled = true;
   return group;
 }
 
@@ -879,6 +943,7 @@ function reasonControl(item) {
     const option = el('option', '', text); option.value = value; select.append(option);
   }
   select.value = item.reason;
+  select.disabled = pendingReactions.has(item.id);
   select.addEventListener('change', () => react(item, { reason: select.value }).catch(e => notice(e.message)));
   label.append(select); return label;
 }
@@ -1040,19 +1105,19 @@ function render(preservePosition = true) {
 }
 function renderFeed() {
   $('#recommendation-panel').hidden = state.tab !== 'recommended';
-  $('#view-filter-open').disabled = !activeCustomFilter;
+  $('#view-filter-open').disabled = !activeCustomFilter || state.tab !== 'recommended';
   $('#search-clear').hidden = !$('#search').value;
   previewObserver.disconnect();
   const feed = $('#feed');
   const openedRecords = new Set([...feed.querySelectorAll('article:has(.discovery-context details[open])')].map(article => article.dataset.id));
   feed.replaceChildren(); feed.setAttribute('aria-busy', 'false');
   updateResultCount();
-  $('#current-view-title').textContent = currentView()?.name || '一覧';
-  if (!customFilters.length && customClassificationReady) {
+  $('#current-view-title').textContent = readingTitle();
+  if (!sidebarSource && !customFilters.length && customClassificationReady) {
     const box = el('div', 'empty'); box.append(el('h3', '', '保存した一覧はありません'), button('一覧を追加', () => $('#custom-filter-plus').click()));
     feed.append(box); return;
   }
-  if (!state.items.length && activeCustomFilter) {
+  if (!state.items.length && activeCustomFilter && state.tab === 'recommended') {
     const box = el('div', 'empty');
     box.append(el('h3', '', '条件に合う記事がありません'), button('条件を編集', () => openFilters('conditions')));
     feed.append(box); return;
@@ -1297,7 +1362,7 @@ async function load(more = false, preservePosition = false, retainCurrent = fals
   showDiscoveryPanel();
   saveClassification();
   if (more && state.loading) return;
-  if (customClassificationReady && !activeCustomFilter) { ++loadVersion; state.loading = false; state.items = []; state.total = 0; render(); return; }
+  if (!sidebarSource && customClassificationReady && !activeCustomFilter) { ++loadVersion; state.loading = false; state.items = []; state.total = 0; render(); return; }
   const version = ++loadVersion;
   if (!await persistCustomClassification()) {
     if (version === loadVersion) { state.loading = false; $('#feed').setAttribute('aria-busy', 'false'); $('#more').disabled = false; }
@@ -1313,12 +1378,27 @@ async function load(more = false, preservePosition = false, retainCurrent = fals
     }
     const params = new URLSearchParams({ tab: state.tab, source: $('#source').value, q: $('#saved-search').value, search: $('#search').value, sort: $('#sort').value, limit: 50, offset: 0 });
     if (more) for (const item of state.items) params.append('exclude_id', item.id);
-    if (state.tab === 'recommended' && activeCustomFilter) params.set('custom_filter', activeCustomFilter);
-    for (const kind of state.selectedKinds) params.append('kind', kind);
-    for (const topic of state.selectedTopics) params.append('topic', topic);
-    for (const tag of state.selectedTags) params.append('tag', tag);
+    if (state.tab === 'all' && sidebarSource) {
+      params.set('source', sidebarSource.id);
+      params.delete('q');
+    } else {
+      if (state.tab === 'recommended' && activeCustomFilter) params.set('custom_filter', activeCustomFilter);
+      if (sidebarSource) params.set('sidebar_source', sidebarSource.id);
+      for (const kind of state.selectedKinds) params.append('kind', kind);
+      for (const topic of state.selectedTopics) params.append('topic', topic);
+      for (const tag of state.selectedTags) params.append('tag', tag);
+    }
+    const revision = reactionRevision;
     const result = await api('api/items?' + params);
+    if (version === loadVersion && revision !== reactionRevision) {
+      state.loading = false;
+      return load(more, preservePosition, retainCurrent);
+    }
     if (version !== loadVersion) return;
+    for (const item of result.items) {
+      const pending = pendingReactions.get(item.id);
+      if (pending) Object.assign(item, pending.optimistic);
+    }
     const previousCount = state.items.length;
     if (more) state.items = [...state.items, ...result.items.filter(i => !state.items.some(x => x.id === i.id))];
     else if (retainCurrent && previousCount) {
@@ -1326,13 +1406,82 @@ async function load(more = false, preservePosition = false, retainCurrent = fals
       state.items = state.items.map(item => updates.get(item.id) || item);
     } else { retainedForReading.clear(); state.items = result.items; }
     state.total = more ? previousCount + result.total : retainCurrent ? Math.max(previousCount, result.total) : result.total;
-    render(more || preservePosition); updateSelections(); $('#new-items').hidden = true;
+    render(more || preservePosition);
+    for (const item of state.items) if (pendingReactions.has(item.id)) patchReaction(item);
+    updateSelections(); $('#new-items').hidden = true;
     return true;
   } catch (e) { if (version === loadVersion) notice(e.message); } finally { if (version === loadVersion) { state.loading = false; $('#more').disabled = false; $('#feed').setAttribute('aria-busy', 'false'); } }
 }
 async function loadSources() {
   state.sources = (await api('api/sources')).sources;
   renderSourceChoices();
+  renderRssLinks($('#rss-sources'), rssSources(), '');
+  renderCustomFilters();
+  for (const [id, menu] of viewRssMenus) {
+    if (!menu.hidden && menu.isConnected) void loadViewRss(id, menu);
+  }
+}
+function rssSources() {
+  return state.sources.filter(source => source.adapter === 'rss')
+    .sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+}
+function renderRssLinks(menu, sources, viewId) {
+  const focusedId = menu.contains(document.activeElement) && document.activeElement.dataset.rssSource;
+  const links = sources.map(source => {
+    const control = el('button', 'rss-source', source.name);
+    control.type = 'button'; control.dataset.rssSource = source.id; control.dataset.rssView = viewId;
+    control.addEventListener('click', () => {
+      if (viewId) void selectCustomFilter(viewId, source);
+      else void selectRssSource(source);
+    });
+    return control;
+  });
+  menu.replaceChildren(...(links.length ? links : [el('p', 'muted', viewId ? '該当するRSS配信元はありません' : 'RSS配信元が登録されていません')]));
+  updateRssSelection();
+  if (focusedId) menu.querySelector(`[data-rss-source="${focusedId}"]`)?.focus({preventScroll: true});
+}
+function updateRssSelection() {
+  const viewId = state.tab === 'recommended' ? activeCustomFilter : '';
+  for (const control of document.querySelectorAll('[data-rss-source]')) {
+    control.setAttribute('aria-pressed', control.dataset.rssSource === String(sidebarSource?.id) && control.dataset.rssView === viewId);
+  }
+}
+async function loadViewRss(viewId, menu) {
+  const request = String(Number(menu.dataset.request || 0) + 1);
+  menu.dataset.request = request;
+  menu.setAttribute('aria-busy', 'true');
+  if (!menu.hasChildNodes()) menu.append(el('p', 'muted', '配信元を読み込み中…'));
+  try {
+    const {source_ids} = await api('api/views/source-ids?' + new URLSearchParams({id: viewId}));
+    if (menu.dataset.request !== request) return;
+    const matching = new Set(source_ids);
+    renderRssLinks(menu, rssSources().filter(source => matching.has(source.id)), viewId);
+  } catch {
+    if (menu.dataset.request !== request) return;
+    menu.replaceChildren(button('配信元を再読み込み', () => loadViewRss(viewId, menu)));
+  } finally {
+    if (menu.dataset.request === request) menu.setAttribute('aria-busy', 'false');
+  }
+}
+async function selectRssSource(source) {
+  if (customFilterBusy) return;
+  if (!await persistCustomClassification()) {
+    openFilters('conditions'); return;
+  }
+  if (customFilterBusy) return;
+  customFilterBusy = true;
+  try {
+    const changed = state.tab !== 'all' || sidebarSource?.id !== source.id;
+    if (changed) $('#search').value = '';
+    sidebarSource = source;
+    if (state.tab !== 'all') await setViewTab('all', false, false);
+    else updateRssSelection();
+    const loaded = await load();
+    if ($('#classification-dialog').open) $('#classification-dialog').close();
+    if (changed && loaded) window.scrollTo({top: 0, left: 0, behavior: 'instant'});
+  } finally {
+    customFilterBusy = false; renderCustomFilters();
+  }
 }
 function renderSourceChoices(selected = $('#source').value) {
   const select = $('#source');
@@ -1414,7 +1563,7 @@ function placeClassification() {
   const wasOpen = $('#classification-dialog').open;
   if (wasOpen) $('#classification-dialog').close();
   (classificationMobile.matches ? $('#classification-mobile-slot') : $('#classification')).append($('#classification-controls'));
-  if (wasOpen && !classificationMobile.matches) $('#custom-filter-tabs button[aria-pressed=true]')?.focus();
+  if (wasOpen && !classificationMobile.matches) $('#classification-controls button[aria-pressed=true]')?.focus();
 }
 classificationMobile.addEventListener('change', placeClassification); placeClassification();
 
