@@ -134,12 +134,17 @@ class Handler(BaseHTTPRequestHandler):
                 one = lambda key, default="": query.get(key, [default])[0]
                 limit = max(1, min(100, int(one("limit", "50"))))
                 offset = max(0, int(one("offset", "0")))
-                result = store.list_items(one("tab", "recommended"), one("kind"), one("q")[:200], one("source"), limit, offset, sort=one('sort') or None, topics=query.get('topic', []), tags=query.get('tag', []), kinds=query.get('kind', []), custom_filter=one('custom_filter'), search_query=one('search')[:200], exclude_ids=query.get('exclude_id', []))
+                result = store.list_items(one("tab", "recommended"), one("kind"), one("q")[:200], one("source"), limit, offset, sort=one('sort') or None, topics=query.get('topic', []), tags=query.get('tag', []), kinds=query.get('kind', []), custom_filter=one('custom_filter'), search_query=one('search')[:200], exclude_ids=query.get('exclude_id', []), sidebar_source=one('sidebar_source'))
                 cached = self.server.previews.cached_for(result['items'])
                 for item in result['items']:
                     if item['id'] in cached: item['link_preview'] = cached[item['id']]
                 self.server.enricher.enqueue(result['items'][:50])
                 self.send(200, result)
+            elif not mutation and path == '/api/views/source-ids':
+                view_id = query.get('id', [''])[0]
+                if not view_id:
+                    raise ValueError('一覧を指定してください')
+                self.send(200, store.list_items(custom_filter=view_id, source_ids_only=True))
             elif not mutation and path == '/api/views':
                 self.send(200, {'filters': store.ensure_custom_views()})
             elif mutation and path == '/api/views/rename':
@@ -269,6 +274,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif mutation and len(parts) == 5 and parts[4] == "react":
                     view_id = query.get('custom_filter', [''])[0]
                     search = query.get('search', [''])[0]
+                    sidebar_source = query.get('sidebar_source', [''])[0]
                     if len(search) > 200:
                         raise ValueError('検索語は200文字以内です')
                     with store.transaction():
@@ -276,7 +282,7 @@ class Handler(BaseHTTPRequestHandler):
                             store.custom_filter(view_id)
                         item = store.react(parts[3], data)
                         if view_id:
-                            item['view_matches'] = bool(store.list_items(custom_filter=view_id, search_query=search, only_ids=[parts[3]], limit=1)['total'])
+                            item['view_matches'] = bool(store.list_items(custom_filter=view_id, search_query=search, sidebar_source=sidebar_source, only_ids=[parts[3]], limit=1, preference_topics=item['preference_weights'])['total'])
                     self.send(200, item)
                 elif mutation and len(parts) == 5 and parts[4] == 'tags':
                     if len(data) != 1 or next(iter(data)) not in {'add', 'remove'}:

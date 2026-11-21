@@ -1131,3 +1131,16 @@ body { font-family: var(--xangi-font-family); font-size: var(--xangi-font-ui); }
 
 .news .ai-comment-text {
   font-size: 14px}
+
+/* RSS navigation uses the same density and selection colors as saved views. */
+#rss-menu { margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+#rss-menu > summary { cursor: pointer; padding: 12px 8px; min-height: 44px; font-size: var(--xangi-font-ui); font-weight: 700; }
+#rss-sources { max-height: 40dvh; overflow-y: auto; }
+.rss-links:not([hidden]) { display: grid; gap: 2px; padding-bottom: 4px; }
+.rss-links button { min-width: 0; min-height: 44px; text-align: left; overflow-wrap: anywhere; font-size: var(--xangi-font-ui); }
+.rss-links button[aria-pressed=true] { background: var(--accent-soft); color: var(--accent); }
+.view-rss-links { margin-left: 28px; padding-left: 8px; border-left: 1px solid var(--line); }
+.view-row > .view-rss-toggle { flex: 0 0 32px; width: 32px; min-height: 44px; padding: 0; color: var(--muted); text-align: center; }
+@media (pointer: coarse) { .view-row > .view-rss-toggle { flex-basis: 44px; width: 44px; } }
+.view-rss-toggle::before { content: ''; display: inline-block; width: 7px; height: 7px; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(-45deg); }
+.view-rss-toggle[aria-expanded=true]::before { transform: rotate(45deg); }
