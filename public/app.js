@@ -23,7 +23,24 @@ function restoreSort() {
   $('#sort').value = 'updated';
 }
 restoreSort();
+const listDisplay = $('#list-display');
+const listDisplayKey = 'xangi-feed-list-display';
+try {
+  const saved = localStorage.getItem(listDisplayKey);
+  if ([...listDisplay.options].some(option => option.value === saved)) listDisplay.value = saved;
+} catch {}
+listDisplay.addEventListener('change', () => {
+  try { localStorage.setItem(listDisplayKey, listDisplay.value); } catch {}
+  render();
+});
 let detailItem = null;
+const detailDialog = $('#detail');
+const readerToggle = $('#reader-toggle');
+const readerMedia = matchMedia('(min-width: 1200px)');
+const readerPreferenceKey = 'xangi-feed-desktop-reader';
+let readerPreference = false;
+try { readerPreference = localStorage.getItem(readerPreferenceKey) === 'on'; } catch {}
+const readerEnabled = () => readerMedia.matches && readerPreference;
 let discussionItem = null, discussionRequestId = null, discussionBusy = false, discussionReady = false;
 const noteDrafts = new Map();
 const notionBusy = new Set(), notionMessages = new Map();
@@ -94,6 +111,20 @@ function articleLink(item, label, url = item.url) {
   configureArticleLink(control, url);
   control.addEventListener('click', event => recordLinkActivation(event, item));
   control.addEventListener('auxclick', event => recordLinkActivation(event, item));
+  return control;
+}
+function listTitleLink(item, label) {
+  const control = articleLink(item, label);
+  control.className = 'news-title';
+  if (readerEnabled()) control.title = '右ペインで読む';
+  control.addEventListener('click', event => {
+    if (!readerEnabled() || event.defaultPrevented || event.button !== 0 ||
+        event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    void openDetail(item).then(() => {
+      if (detailDialog.open && detailDialog.dataset.id === item.id && control.isConnected) control.focus({preventScroll: true});
+    }).catch(error => notice(error.message));
+  }, {capture: true});
   return control;
 }
 async function recordArticleOpen(item) {
@@ -672,7 +703,7 @@ let scrollSkipSeen = new WeakSet();
 const scrollSkipPending = new Set();
 function scrollSkipActive() {
   return scrollSkipEnabled && !state.loading && !document.hidden &&
-    !document.querySelector('dialog[open]') && currentView()?.conditions.read !== 'read' && currentView()?.conditions.muted !== 'only';
+    !document.querySelector('dialog:modal') && currentView()?.conditions.read !== 'read' && currentView()?.conditions.muted !== 'only';
 }
 const scrollSkipObserver = new IntersectionObserver(entries => {
   if (!scrollSkipActive()) return;
@@ -728,13 +759,41 @@ window.addEventListener('scroll', () => {
   });
 }, { passive: true });
 let detailOpening = 0;
+function showDetailDialog() {
+  if (readerEnabled()) detailDialog.show();
+  else detailDialog.showModal();
+}
+function syncReaderSelection() {
+  const selected = readerEnabled() && detailDialog.open ? detailDialog.dataset.id : null;
+  $('#reader-empty').hidden = !readerEnabled() || !!selected;
+  for (const title of $('#feed').querySelectorAll('.news-title')) {
+    if (title.closest('article').dataset.id === selected) title.setAttribute('aria-current', 'true');
+    else title.removeAttribute('aria-current');
+  }
+}
+function syncReaderLayout() {
+  const enabled = readerEnabled();
+  readerToggle.hidden = !readerMedia.matches;
+  readerToggle.setAttribute('aria-pressed', enabled);
+  $('.reading-layout').classList.toggle('reader-enabled', enabled);
+  if (detailDialog.open && enabled === detailDialog.matches(':modal')) {
+    detailDialog.close();
+    if (detailItem) renderDetail(detailItem);
+    showDetailDialog();
+  }
+  layoutClassification();
+  syncReaderSelection();
+}
 async function openDetail(item, target = '') {
   const opening = ++detailOpening;
+  const previous = detailDialog.open ? detailDialog.dataset.id : null;
   const updated = await api(`api/items/${item.id}`);
   if (opening !== detailOpening) return;
   Object.assign(item, updated, pendingReactions.get(item.id)?.optimistic || {});
   renderDetail(item);
-  if (!$('#detail').open) $('#detail').showModal();
+  if (!detailDialog.open) showDetailDialog();
+  if (previous !== item.id) detailDialog.scrollTop = 0;
+  syncReaderSelection();
   if (target === 'tags') { $('#manual-tag-input').scrollIntoView({ block: 'center' }); $('#manual-tag-input').focus({ preventScroll: true }); }
   if (target === 'note') {
     $('#article-note').scrollIntoView({ block: 'center' });
@@ -969,6 +1028,7 @@ function fillLinkCard(card, data) {
     image.src = new URL(`api/items/${card.dataset.itemId}/preview/image`, base).href;
     image.addEventListener('error', () => image.remove(), {once: true}); card.append(image);
   }
+  if (card.classList.contains('list-thumbnail')) return;
   const text = el('span', 'link-card-text');
   text.append(el('strong', 'link-card-title', data.title || card.dataset.title), el('span', 'link-card-site', data.site_name || card.dataset.site));
   if (data.description) text.append(el('span', 'link-card-description', data.description));
@@ -990,15 +1050,24 @@ async function hydrateLinkCard(card) {
     if (['done', 'error'].includes(result.status)) previewData.set(id, result);
     if (showLinkPreviews && card.isConnected) fillLinkCard(card, result);
   } catch { /* Keep the article title and site when a preview is unavailable. */ }
+  finally { delete card.dataset.previewPending; }
 }
-function linkCard(item) {
+function linkCard(item, thumbnailOnly = false) {
   if (!showLinkPreviews) return document.createDocumentFragment();
-  const card = articleLink(item, ''); card.className = 'link-card';
-  card.dataset.itemId = item.id; card.dataset.title = item.title; card.dataset.site = new URL(item.url).hostname;
-  card.setAttribute('aria-label', `リンクカード: ${item.title}`);
+  const card = thumbnailOnly ? el('span', 'list-thumbnail') : articleLink(item, '');
+  card.dataset.itemId = item.id;
+  if (!thumbnailOnly) {
+    card.className = 'link-card';
+    card.dataset.title = item.title;
+    card.dataset.site = new URL(item.url).hostname;
+    card.setAttribute('aria-label', `リンクカード: ${item.title}`);
+  }
   if (item.link_preview) previewData.set(item.id, item.link_preview);
   fillLinkCard(card, previewData.get(item.id) || {});
-  if (!previewData.has(item.id)) previewObserver.observe(card);
+  if (!previewData.has(item.id)) {
+    if (thumbnailOnly) card.dataset.previewPending = '';
+    previewObserver.observe(card);
+  }
   return card;
 }
 function meta(item) {
@@ -1107,8 +1176,8 @@ function renderFeed() {
   $('#recommendation-panel').hidden = state.tab !== 'recommended';
   $('#view-filter-open').disabled = !activeCustomFilter || state.tab !== 'recommended';
   $('#search-clear').hidden = !$('#search').value;
-  previewObserver.disconnect();
   const feed = $('#feed');
+  for (const preview of feed.querySelectorAll('.link-card, .list-thumbnail')) previewObserver.unobserve(preview);
   const openedRecords = new Set([...feed.querySelectorAll('article:has(.discovery-context details[open])')].map(article => article.dataset.id));
   feed.replaceChildren(); feed.setAttribute('aria-busy', 'false');
   updateResultCount();
@@ -1151,11 +1220,28 @@ function renderFeed() {
     const box = el('div', 'empty'); box.append(el('h3', '', state.tab === 'saved' ? '残しておきたい記事をブックマークしよう' : state.tab === 'discussed' ? '気になる記事から、話してみよう' : '記事はまだありません'), el('p', '', '配信元と取得状態を確認するか、検索条件を変えてみてください。'));
     box.append(button('配信元を確認', showSettings)); feed.append(box); return;
   }
+  const display = listDisplay.value;
   for (const item of state.items) {
     const article = el('article', 'news'); article.dataset.id = item.id;
     const result = item.analysis?.result || null;
-    const title = articleLink(item, result?.title_ja || item.title);
-    title.className = 'news-title';
+    const title = listTitleLink(item, result?.title_ja || item.title);
+    if (display !== 'standard') {
+      const text = el('div', 'compact-news-text');
+      text.append(title);
+      article.classList.add('compact-news');
+      if (display === 'summary') {
+        const summary = result?.summary_ja || item.summary;
+        if (summary) text.append(el('p', 'compact-news-summary', summary));
+        article.classList.add('with-summary');
+      }
+      article.append(text);
+      if (display === 'summary') article.append(linkCard(item, true));
+      const detail = iconButton('記事の詳細', () => openDetail(item), icon('more'), 'compact-news-detail');
+      detail.setAttribute('aria-haspopup', 'dialog');
+      article.append(detail);
+      feed.append(article);
+      continue;
+    }
     article.append(meta(item));
     if (currentView()?.conditions.origin === 'manual') article.append(el('p', 'muted', item.manual_added_at == null ? '追加日時不明（取得 ' + date(item.fetched) + '）' : '追加 ' + date(item.manual_added_at)));
     if (currentView()?.conditions.read === 'read') article.append(el('p', 'muted', item.read_at == null ? '読了日時不明' : '読了 ' + date(item.read_at)));
@@ -1171,6 +1257,7 @@ function renderFeed() {
     if (state.tab === 'recommended') article.append(el('p', 'recommendation', item.recommendation));
     feed.append(article);
   }
+  syncReaderSelection();
   observeScrollSkip();
 }
 const recommendationRecords = new Map();
@@ -1203,11 +1290,20 @@ function recommendationEvidence(item) {
 }
 function renderDetail(item) {
   detailItem = item;
-  const body = $('#detail-body'); body.replaceChildren(); $('#detail').dataset.id = item.id;
+  const body = $('#detail-body');
+  for (const preview of body.querySelectorAll('.link-card')) previewObserver.unobserve(preview);
+  body.replaceChildren(); detailDialog.dataset.id = item.id;
   const result = item.analysis?.result || null;
   body.append(meta(item), el('h2', 'detail-title', result?.title_ja || item.title), articleLink(item, item.kind === 'video' ? 'YouTubeで見る' : '原文を読む'), el('p', 'evidence', evidence(item)), linkCard(item), editorial(item), recommendationEvidence(item), topicNodes(item), actions(item, true));
   if (item.discovery) body.append(discoveryContext(item));
-  if (result) { const original = el('details'); original.append(el('summary', '', '原文のタイトル・抜粋'), el('h3', '', item.title), el('p', 'excerpt', item.summary)); body.append(original); }
+  if (result) {
+    const original = el('details');
+    original.append(el('summary', '', '原文のタイトル・抜粋'), el('h3', '', item.title), el('p', 'excerpt', item.summary));
+    if (readerEnabled() && item.content_origin === 'rss' && item.summary) {
+      original.open = true;
+      body.insertBefore(original, body.querySelector('.editorial'));
+    } else body.append(original);
+  }
   if (['manual', 'discovery'].includes(item.content_origin)) {
     if (item.content_text) {
       const captured = el('details'); captured.className = 'captured-article';
@@ -1414,6 +1510,10 @@ async function load(more = false, preservePosition = false, retainCurrent = fals
 }
 async function loadSources() {
   state.sources = (await api('api/sources')).sources;
+  const failed = state.sources.filter(source => source.enabled && source.error).length;
+  const failures = $('#source-failures');
+  failures.textContent = failed ? `取得失敗 ${failed}件` : '';
+  failures.hidden = !failed;
   renderSourceChoices();
   renderRssLinks($('#rss-sources'), rssSources(), '');
   renderCustomFilters();
@@ -1578,7 +1678,11 @@ try {
 } catch {}
 function layoutClassification() {
   if (classificationMobile.matches) { finishClassificationResize(true); return; }
-  const max = Math.max(180, Math.min(480, classificationLayout.clientWidth - 56 - 28 - 360));
+  if (readerEnabled()) {
+    const top = classificationLayout.getBoundingClientRect().top + window.scrollY;
+    classificationLayout.style.setProperty('--reader-start', `${Math.max(16, top)}px`);
+  }
+  const max = Math.max(180, Math.min(readerEnabled() ? 320 : 480, classificationLayout.clientWidth - 56 - 28 - 360));
   const width = Math.round(Math.max(180, Math.min(classificationWidth ?? 240, max)));
   classificationLayout.style.setProperty('--classification-width', `${width}px`);
   for (const [key, value] of Object.entries({ min: 180, max, now: width, text: `${width}px` })) {
@@ -1763,8 +1867,6 @@ async function poll() {
       await loadSources();
       if (status.added) { $('#new-items').textContent = `新着${status.added}件を表示`; $('#new-items').hidden = false; }
       if (state.refreshPending || !state.items.length) { const manual = state.refreshPending; state.refreshPending = false; await load(false, !manual, !manual); }
-      const failed = state.sources.filter(s => s.enabled && s.error);
-      if (failed.length) notice(`${failed.length}件の配信元で取得に失敗しました。「設定」で確認できます。`);
     }
     state.lastFinished = status.last_finished;
     state.polled = true;
@@ -1815,7 +1917,24 @@ $('#saved-search').addEventListener('input', () => { clearTimeout(searchTimer); 
 $('#more').addEventListener('click', () => load(true)); $('#new-items').addEventListener('click', () => load());
 $('#refresh').addEventListener('click', async () => { try { state.refreshPending = true; await api('api/refresh', {}); await poll(); } catch (e) { notice(e.message); } });
 $('#settings-open').addEventListener('click', () => showSettings().catch(e => notice(e.message)));
-$('#detail-close').addEventListener('click', () => $('#detail').close()); $('#settings-close').addEventListener('click', () => $('#settings').close());
+$('#source-failures').addEventListener('click', async () => {
+  try {
+    await showSettings();
+    $('#sources').closest('section').scrollIntoView({block: 'start'});
+    $('#source-message').focus({preventScroll: true});
+  } catch (error) { notice(error.message); }
+});
+$('#detail-close').addEventListener('click', () => { ++detailOpening; detailDialog.close(); });
+detailDialog.addEventListener('close', syncReaderSelection);
+readerToggle.addEventListener('click', () => {
+  readerPreference = !readerPreference;
+  try { localStorage.setItem(readerPreferenceKey, readerPreference ? 'on' : 'off'); } catch {}
+  syncReaderLayout();
+  render();
+});
+readerMedia.addEventListener('change', () => { syncReaderLayout(); if (readerPreference) render(); });
+syncReaderLayout();
+$('#settings-close').addEventListener('click', () => $('#settings').close());
 $('#reset').addEventListener('click', async () => { if (!confirm('Good／Badと好みの学習をリセットします。保存記事と議論は残ります。')) return; try { await api('api/profile/reset', { confirm: true }); await showSettings(); await load(); } catch (e) { notice(e.message); } });
 $('#source-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.target, submit = form.querySelector('[type=submit]'); submit.disabled = true;
