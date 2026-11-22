@@ -10,12 +10,14 @@
   <script type="module" src="bookmarklet-settings.js"></script>
 </head>
 <body>
-  <header class="topbar">
+  <header class="feed-header">
+  <div class="topbar">
     <button id="classification-open" aria-label="一覧を選ぶ" aria-haspopup="dialog" aria-controls="classification-dialog" title="一覧を選ぶ"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span id="classification-count" aria-hidden="true" hidden></span></button>
     <div class="brand"><a href="/" id="home" class="home-link" hidden aria-label="xangiホーム" target="_top"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m3 10 9-7 9 7v10H15v-7H9v7H3z"/></svg><span>xangiホーム</span></a><h1>xangi-feed</h1></div>
     <div class="header-preferences"><button id="settings-open">設定</button><label class="theme-select"><span class="sr-only">表示テーマ</span><select id="theme-select" aria-label="表示テーマ"><option value="system">端末設定</option><option value="light">ライト</option><option value="dark">ダーク</option></select></label></div>
+  </div>
+  <div class="feed-actions"><div class="feed-status"><span id="sync-status">読み込み中</span><button id="source-failures" type="button" title="取得失敗の詳細を設定で確認" hidden></button></div><div class="feed-action-buttons"><button id="refresh" aria-label="今すぐ取得" title="今すぐ取得"><svg class="refresh-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17"/></svg><span>今すぐ取得</span></button><button id="article-open">記事を追加</button></div></div>
   </header>
-  <div class="feed-actions"><span id="sync-status">読み込み中</span><div><button id="refresh" aria-label="今すぐ取得" title="今すぐ取得"><svg class="refresh-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17"/></svg><span>今すぐ取得</span></button><button id="article-open">記事を追加</button></div></div>
   <div class="reading-layout">
     <aside id="classification" aria-label="保存した一覧"><h2>一覧</h2><div id="classification-controls"><details id="rss-menu" class="view-menu"><summary>RSS 配信元</summary><div id="rss-sources" class="rss-links"></div></details><nav class="view-menu" aria-label="保存した一覧"><div id="custom-filter-tabs"></div><button id="custom-filter-plus" type="button" disabled>＋ 一覧を追加</button></nav><p id="view-order-message" class="sr-only" role="status"></p></div></aside>
   <div id="resize-classification" role="separator" tabindex="0" aria-label="分類パネルの幅" aria-orientation="vertical" aria-controls="classification" title="ドラッグまたは左右キーで幅調整。ダブルクリックで初期幅に戻す"></div>
@@ -31,7 +33,17 @@
       </details>
       <p id="discovery-message" role="status"></p>
     </section>
-    <div class="list-info"><p id="result-count"></p><button id="new-items" hidden></button></div>
+    <div class="list-info">
+      <p id="result-count"></p><button id="new-items" hidden></button>
+      <label class="list-display-control"><span>一覧表示</span>
+        <select id="list-display">
+          <option value="standard">標準</option>
+          <option value="summary">タイトル＋概要＋サムネイル</option>
+          <option value="titles">タイトルのみ</option>
+        </select>
+      </label>
+      <button id="reader-toggle" type="button" aria-pressed="false" aria-controls="reader-pane" hidden>3ペイン</button>
+    </div>
     <p id="custom-filter-message" role="status"></p><button id="custom-filter-retry" type="button" hidden>一覧を再読み込み</button>
     <p id="notice" class="notice" role="status" hidden></p>
     <p id="reading-action-message" class="sr-only" role="status"></p>
@@ -39,6 +51,10 @@
     <button id="more" class="more" hidden>次の50件を表示</button>
     <noscript><p>記事の表示と評価にはJavaScriptが必要です。</p></noscript>
   </main>
+  <div id="reader-pane">
+    <p id="reader-empty" hidden>記事を選ぶとここに表示します。</p>
+    <dialog id="detail" aria-labelledby="detail-label"><div class="dialog-toolbar"><span id="detail-label">記事の詳細</span><button id="detail-close" aria-label="詳細を閉じる">閉じる</button></div><div id="detail-body"></div></dialog>
+  </div>
   </div>
   <dialog id="view-settings" aria-labelledby="view-settings-title"><div class="dialog-toolbar"><h2 id="view-settings-title">一覧の設定</h2><button id="view-settings-close" type="button">閉じる</button></div><p id="settings-save-message" class="muted" role="status"></p><button id="settings-save-retry" type="button" hidden>保存を再試行</button><details id="view-meta-group"><summary>名前・複製・並べ替え</summary>    <fieldset id="custom-filter-controls" disabled>
       <div id="custom-filter-editor"><label>一覧名<input id="custom-filter-name" maxlength="80" placeholder="例：ポッドキャストだけ"></label>
@@ -100,7 +116,6 @@
       <button type="submit" class="primary">追加して開く</button><p id="article-error" role="alert"></p>
     </form>
   </dialog>
-  <dialog id="detail"><div class="dialog-toolbar"><span>記事の詳細</span><button id="detail-close" aria-label="詳細を閉じる">閉じる</button></div><div id="detail-body"></div></dialog>
   <dialog id="discussion"><div class="dialog-toolbar"><h2>xangiと話す</h2><button id="discussion-close">閉じる</button></div>
     <p id="discussion-title"></p><form id="discussion-form">
       <label>追記プロンプト（任意）<textarea name="prompt" maxlength="4000" rows="4" placeholder="このニュースを手元で試すなら何から始めればよい？"></textarea></label>
