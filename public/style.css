@@ -11,7 +11,8 @@ custom editorial app. */
   --xangi-font-reading: 16px;
   --xangi-font-code: 13px;
   --xangi-font-metric: 24px;
-  --xangi-font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif;
+  --xangi-font-family: system-ui, sans-serif;
+  --xangi-font-reading-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif;
 
   color-scheme:light dark;
   --bg:#f7f6f3;
@@ -24,7 +25,7 @@ custom editorial app. */
   --bad:#a33535;
   --focus:#2383e2;
   --shadow:#0003;
-  --font:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans JP",sans-serif;
+  --font:var(--xangi-font-family);
   --serif:ui-serif,"Noto Serif JP",serif
 }
 :root[data-theme="dark"] {
@@ -1104,6 +1105,15 @@ body.resizing-classification { cursor:col-resize; user-select:none; }
   font-size: var(--xangi-font-ui);
   overflow-wrap: anywhere;
 }
+.compact-news-source {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-size: var(--xangi-font-caption);
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .list-thumbnail { flex: 0 0 64px; min-height: 48px; }
 .list-thumbnail:empty:not([data-preview-pending]) { display: none; }
 .list-thumbnail img { display: block; width: 64px; height: 48px; border-radius: 4px; object-fit: cover; }
@@ -1254,3 +1264,5 @@ body { font-family: var(--xangi-font-family); font-size: var(--xangi-font-ui); }
 @media (pointer: coarse) { .view-row > .view-rss-toggle { flex-basis: 44px; width: 44px; } }
 .view-rss-toggle::before { content: ''; display: inline-block; width: 7px; height: 7px; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(-45deg); }
 .view-rss-toggle[aria-expanded=true]::before { transform: rotate(45deg); }
+
+#detail-body, .ai-comment-text, .note-editor { font-family: var(--xangi-font-reading-family); }

@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -129,6 +130,7 @@ class Store:
         self.db.execute("UPDATE items SET fetch_state='error',fetch_error='本文取得中に再起動しました。本文を再取得してください。' WHERE fetch_state='fetching'")
         self.db.execute('CREATE TABLE IF NOT EXISTS save_requests (id TEXT PRIMARY KEY, item_id TEXT NOT NULL REFERENCES items(id), payload TEXT NOT NULL, created REAL NOT NULL)')
         self.db.execute('CREATE INDEX IF NOT EXISTS save_requests_item ON save_requests(item_id, created)')
+        self.db.execute('CREATE INDEX IF NOT EXISTS items_rated ON items(rating) WHERE rating != 0')
         for pending in self.db.execute('SELECT id,payload FROM save_requests').fetchall():
             state = json.loads(pending['payload'])
             if state.get('status') in {'creating', 'sending'}:
@@ -308,7 +310,7 @@ class Store:
                    (publication, clean(fields.get('author')), item_id))
 
     def preference(self, item, weights=None):
-        weights = weights if weights is not None else {t['name']: t['weight'] for t in self.profile()['topics']}
+        weights = weights if weights is not None else {t['name']: t['weight'] for t in self._preference_topics()}
         own = item['rating'] if item['reason'] not in {'duplicate', 'summary'} else 0
         score = sum(max(-3, min(3, weights.get(topic, 0))) for topic in item['topics']) + own
         return {'preference_score': score,
@@ -643,8 +645,10 @@ class Store:
     def open_item(self, item_id):
         # Consult the persisted policy on every click, including from stale tabs.
         with self.transaction() as db:
-            item = self.item(item_id)
-            marked = bool(self.settings()['mark_read_on_open'] and not item['read'])
+            current = db.execute('SELECT read FROM items WHERE id=?', (item_id,)).fetchone()
+            if current is None:
+                raise KeyError("記事が見つかりません")
+            marked = bool(self.settings()['mark_read_on_open'] and not current['read'])
             if marked:
                 db.execute('UPDATE items SET read=1,read_at=? WHERE id=?', (time.time(), item_id))
             return {'item': self.item(item_id), 'marked_read': marked}
@@ -676,7 +680,7 @@ class Store:
             db.execute("UPDATE items SET " + ",".join(f"{k}=?" for k in values) + " WHERE id=?", (*values.values(), item_id))
             if "rating" in values and values["rating"] != -1:
                 db.execute("UPDATE items SET reason='' WHERE id=?", (item_id,))
-            profile = self.profile()['topics']
+            profile = self._preference_topics()
             item = self.item(item_id, weights={t['name']: t['weight'] for t in profile})
             item['preference_weights'] = profile
             return item
@@ -724,19 +728,29 @@ class Store:
                 self._ingest_discovery(db, value['items'])
             db.execute("INSERT OR REPLACE INTO metadata VALUES ('discovery',?)", (json.dumps(value, ensure_ascii=False),))
 
-    def profile(self):
-        weights = {}
+    def _rated_items(self):
+        # Preserve the topic order for tied weights without scanning unrated rows.
         with self.lock:
-            rows = list(self.db.execute("SELECT rating,reason,topics FROM items WHERE rating!=0"))
-            counts = dict(self.db.execute("SELECT rating,COUNT(*) FROM items GROUP BY rating").fetchall())
-            saved = self.db.execute("SELECT COUNT(*) FROM items WHERE saved=1").fetchone()[0]
-        for row in rows:
+            return self.db.execute(
+                'SELECT rating,reason,topics FROM items INDEXED BY items_rated WHERE rating != 0 ORDER BY rowid'
+            ).fetchall()
+
+    def _preference_topics(self, rows=None):
+        weights = {}
+        for row in self._rated_items() if rows is None else rows:
             if row["rating"] == -1 and row["reason"] in {"duplicate", "summary"}:
                 continue
             for topic in json.loads(row["topics"]):
                 weights[topic] = weights.get(topic, 0) + row["rating"]
-        return {"good": counts.get(1, 0), "bad": counts.get(-1, 0), "saved": saved,
-                "topics": [{"name": name, "weight": weight} for name, weight in sorted(weights.items(), key=lambda p: -p[1])]}
+        return [{"name": name, "weight": weight} for name, weight in sorted(weights.items(), key=lambda p: -p[1])]
+
+    def profile(self):
+        with self.lock:
+            rows = self._rated_items()
+            saved = self.db.execute("SELECT COUNT(*) FROM items WHERE saved=1").fetchone()[0]
+        return {"good": sum(row['rating'] == 1 for row in rows),
+                "bad": sum(row['rating'] == -1 for row in rows),
+                "saved": saved, "topics": self._preference_topics(rows)}
 
     def reset_profile(self):
         with self.transaction() as db:
@@ -770,20 +784,75 @@ class Store:
         if only_ids is not None and not only_ids:
             return {'source_ids': []} if source_ids_only else {'items': [], 'total': 0}
         args = tuple(only_ids) if only_ids is not None else ()
-        def selection(column):
-            return ' WHERE ' + column + ' IN (' + ','.join('?' for _ in args) + ')' if only_ids is not None else ''
+        def ids_clause(column, ids):
+            return column + ' IN (' + ','.join('?' for _ in ids) + ')'
+        def load_tags(where, params):
+            tags_by_item = {}
+            for row in self.db.execute('SELECT item_id,tag_name FROM item_tags' + where + ' ORDER BY tag_name', params):
+                tags_by_item.setdefault(row['item_id'], []).append(row['tag_name'])
+            return tags_by_item
+        def load_sources(where, params):
+            sources_by_item = {}
+            for row in self.db.execute(
+                'SELECT x.item_id,s.id,s.name FROM item_sources x JOIN sources s ON s.id=x.source_id'
+                + where + ' ORDER BY x.item_id,s.id', params
+            ):
+                sources_by_item.setdefault(row['item_id'], []).append({'id': row['id'], 'name': row['name']})
+            return sources_by_item
+
+        related_where = ' WHERE ' + ids_clause('item_id', args) if only_ids is not None else ''
+        filters = [ids_clause('id', args)] if only_ids is not None else []
+        discovery_filter = 'id IN (SELECT item_id FROM discovered_items)'
+        if conditions:
+            view_filters = {
+                'muted': {'exclude': 'skipped = 0', 'only': 'skipped != 0'},
+                'read': {'unread': 'read = 0', 'read': 'read != 0'},
+                'saved': {'no': 'saved = 0', 'yes': 'saved != 0'},
+                'discussed': {'no': "COALESCE(session_id, '') = ''", 'yes': "session_id != ''"},
+                'origin': {'manual': 'manually_added != 0', 'discovery': discovery_filter},
+            }
+            for field, expressions in view_filters.items():
+                expression = expressions.get(conditions[field])
+                if expression:
+                    filters.append(expression)
+            if conditions['noted'] == 'yes':
+                filters.append("note != ''")
+        else:
+            tab_filters = {
+                'manual': 'manually_added != 0', 'saved': 'saved != 0', 'notes': "note != ''",
+                'discussed': "session_id != ''", 'read': 'read != 0',
+                'discovery': 'read = 0 AND ' + discovery_filter,
+            }
+            filters.append('skipped != 0' if tab == 'muted' else 'skipped = 0')
+            if tab in tab_filters:
+                filters.append(tab_filters[tab])
+            if tab == 'recommended' and apply_recommendation:
+                filters.append(
+                    "read = 0 AND (content_origin IN ('manual', 'discovery') OR EXISTS ("
+                    "SELECT 1 FROM item_sources x JOIN sources s ON s.id=x.source_id WHERE x.item_id=items.id))"
+                )
+        source_args = tuple(source_filters)
+        if any(not isinstance(source, str) for source in source_args):
+            return {'source_ids': []} if source_ids_only else {'items': [], 'total': 0}
+        for _ in source_args:
+            filters.append(
+                'id IN (SELECT x.item_id FROM item_sources x JOIN sources s ON s.id=x.source_id '
+                'WHERE CAST(s.id AS TEXT) = ?)'
+            )
+        item_where = ' WHERE ' + ' AND '.join(filters) if filters else ''
+        need_tags = bool(q or selected_tags)
         with self.lock:
-            save_requests = {r['item_id']: r['payload'] for r in self.db.execute('SELECT item_id,payload FROM save_requests' + selection('item_id') + ' ORDER BY created', args)}
-            rows = [dict(r) for r in self.db.execute('SELECT * FROM items' + selection('id'), args)]
-            discoveries = {r['item_id']: r['payload'] for r in self.db.execute('SELECT item_id,payload FROM discovered_items' + selection('item_id'), args)}
-            analyses = {r['item_id']: dict(r) for r in self.db.execute('SELECT * FROM analyses' + selection('item_id'), args)}
-            item_tags = {}
-            for r in self.db.execute('SELECT item_id,tag_name FROM item_tags' + selection('item_id') + ' ORDER BY tag_name', args):
-                item_tags.setdefault(r['item_id'], []).append(r['tag_name'])
-            sources = {}
-            for r in self.db.execute('SELECT x.item_id,s.id,s.name FROM item_sources x JOIN sources s ON s.id=x.source_id' + selection('x.item_id'), args):
-                sources.setdefault(r['item_id'], []).append({'id': r['id'], 'name': r['name']})
-        profile = self.profile()["topics"] if preference_topics is None else preference_topics
+            cursor = self.db.execute('SELECT * FROM items' + item_where, args + source_args)
+            columns = [column[0] for column in cursor.description]
+            rows = cursor.fetchall()
+            discoveries = {r['item_id']: r['payload'] for r in self.db.execute(
+                'SELECT item_id,payload FROM discovered_items' + related_where, args)}
+            analyses = {r['item_id']: dict(r) for r in self.db.execute(
+                'SELECT * FROM analyses' + related_where, args)} if q else {}
+            item_tags = load_tags(related_where, args) if need_tags else {}
+            source_where = ' WHERE ' + ids_clause('x.item_id', args) if only_ids is not None else ''
+            sources = load_sources(source_where, args) if source_ids_only else {}
+        profile = self._preference_topics() if preference_topics is None else preference_topics
         weights = {t["name"]: t["weight"] for t in profile}
         settings = self.settings() if apply_recommendation else RECOMMENDATION_DEFAULTS
         if view:
@@ -802,46 +871,32 @@ class Store:
                 if analysis['input_hash'] != self.content_hash(item):
                     return None
             return analysis
-        for item in rows:
+        minimum = settings['recommendation_min_preference'] if tab == 'recommended' else None
+        maximum = conditions['max_preference'] if conditions else None
+        need_preference = minimum is not None or maximum is not None or sort == 'preference'
+        need_topics = bool(selected_topics) or need_preference or sort == 'recommended'
+
+        def score(item):
+            age = max(0, now - (item["published"] or item["fetched"])) / 3600
+            preference = sum(max(-3, min(3, weights.get(t, 0))) for t in item["topics"])
+            own_rating = item['rating'] if item['reason'] not in {'duplicate', 'summary'} else 0
+            return freshness_weight / (1 + age / 48) + math.tanh(preference / 3) * preference_weight - (0.6 if own_rating == -1 else 0)
+
+        noted = conditions['noted'] if conditions else 'yes' if tab == 'notes' else 'any'
+        for row in rows:
+            item = dict(zip(columns, row))
             item['muted'] = bool(item.pop('skipped'))
-            if conditions:
-                if conditions['muted'] == 'exclude' and item['muted'] or conditions['muted'] == 'only' and not item['muted']:
-                    continue
-                if conditions['read'] == 'unread' and item['read'] or conditions['read'] == 'read' and not item['read']:
-                    continue
-                flags = {'saved': bool(item['saved']), 'noted': bool(item['note'].strip()), 'discussed': bool(item['session_id'])}
-                if any(conditions[key] != 'any' and flags[key] != (conditions[key] == 'yes') for key in flags):
-                    continue
-                if conditions['origin'] == 'manual' and not item['manually_added'] or conditions['origin'] == 'discovery' and item['id'] not in discoveries:
-                    continue
-            elif item['muted'] != (tab == 'muted'):
-                continue
-            if not view and tab == 'discovery' and (item['id'] not in discoveries or item['read']):
-                continue
-            if not view and tab == 'manual' and not item['manually_added']:
+            if noted != 'any' and bool(item['note'].strip()) != (noted == 'yes'):
                 continue
             item['tags'] = item_tags.get(item['id'], [])
             if selected_tags and not selected_tags.intersection(item['tags']):
                 continue
             if tab == 'recommended':
-                if not view and apply_recommendation and (item['read'] or (not sources.get(item['id']) and item['content_origin'] not in {'manual', 'discovery'})):
-                    continue
                 if settings['recommendation_days'] and date_value(item, ['updated', 'published', 'fetched']) < now - settings['recommendation_days'] * 86400:
                     continue
                 if settings['recommendation_hide_bad'] and item['rating'] == -1:
                     continue
-            if not view and tab == "saved" and not item["saved"]:
-                continue
-            if not view and tab == 'notes' and not item['note'].strip():
-                continue
-            if not view and tab == 'read' and not item['read']:
-                continue
-            if not view and tab == "discussed" and not item["session_id"]:
-                continue
             if (kind or kinds) and item["kind"] not in ({kind} | set(kinds)):
-                continue
-            item["sources"] = sources.get(item["id"], [])
-            if source_filters and not source_filters.issubset(str(source["id"]) for source in item["sources"]):
                 continue
             # Search still includes current analysis results before pagination.
             if q:
@@ -850,25 +905,23 @@ class Store:
                 haystack = (item['title'] + ' ' + item['summary'] + ' ' + item['note'] + ' ' + ' '.join(item['tags']) + json.dumps(analysis_result, ensure_ascii=False)).casefold()
                 if not all(term in haystack for term in q.casefold().split()):
                     continue
-            item["topics"] = json.loads(item["topics"])
+            if need_topics:
+                item["topics"] = json.loads(item["topics"])
             if selected_topics and not selected_topics.intersection(item['topics']):
                 continue
-            matches = [t for t in item["topics"] if weights.get(t, 0) > 0]
-            age = max(0, now - (item["published"] or item["fetched"])) / 3600
-            preference = sum(max(-3, min(3, weights.get(t, 0))) for t in item["topics"])
-            own_rating = item['rating'] if item['reason'] not in {'duplicate', 'summary'} else 0
-            item.update(self.preference(item, weights))
-            minimum = settings['recommendation_min_preference']
-            if tab == 'recommended' and minimum is not None and (not item['preference_known'] or item['preference_score'] < minimum):
+            if need_preference:
+                item.update(self.preference(item, weights))
+            if minimum is not None and (not item['preference_known'] or item['preference_score'] < minimum):
                 continue
-            if conditions and conditions['max_preference'] is not None and (not item['preference_known'] or item['preference_score'] > conditions['max_preference']):
+            if maximum is not None and (not item['preference_known'] or item['preference_score'] > maximum):
                 continue
             if source_ids_only:
-                matching_sources.update(source['id'] for source in item['sources'])
+                matching_sources.update(source['id'] for source in sources.get(item['id'], ()))
                 continue
-            item["score"] = freshness_weight / (1 + age / 48) + math.tanh(preference / 3) * preference_weight - (0.6 if own_rating == -1 else 0)
-            item["recommendation"] = "好み（Good／Bad）: " + "、".join(matches) if matches else "好み（Good／Bad）: 一致するGoodの話題はまだありません"
+            if sort == 'recommended':
+                item["score"] = score(item)
             result.append(item)
+        del rows
         if source_ids_only:
             return {'source_ids': sorted(matching_sources)}
 
@@ -890,18 +943,44 @@ class Store:
         if tab == 'recommended' and sort == 'recommended' and settings['recommendation_mix_types'] and not kind and not kinds and not source_filters:
             # Balance categories before slicing: an arXiv batch must not occupy
             # every visible row. New tab remains a strict chronological view.
-            groups = {k: [] for k in ['tech', 'blog', 'podcast', 'paper', 'video', 'news', 'comic', 'rss']}
+            groups = {k: deque() for k in ['tech', 'blog', 'podcast', 'paper', 'video', 'news', 'comic', 'rss']}
             for item in result:
-                groups.setdefault(item['kind'], []).append(item)
+                if item['kind'] not in groups:
+                    groups[item['kind']] = deque()
+                groups[item['kind']].append(item)
             result = []
             while any(groups.values()):
                 for group in groups.values():
                     if group:
-                        result.append(group.pop(0))
+                        result.append(group.popleft())
         excluded = set(exclude_ids)
-        result = [item for item in result if item['id'] not in excluded]
+        if excluded:
+            result = [item for item in result if item['id'] not in excluded]
         page = result[offset:offset + limit]
+        save_requests = {}
+        with self.lock:
+            for start in range(0, len(page), 500):
+                ids = [item['id'] for item in page[start:start + 500]]
+                where = ' WHERE ' + ids_clause('item_id', ids)
+                if not q:
+                    analyses.update((r['item_id'], dict(r)) for r in self.db.execute('SELECT * FROM analyses' + where, ids))
+                save_requests.update((r['item_id'], r['payload']) for r in self.db.execute(
+                    'SELECT item_id,payload FROM save_requests' + where + ' ORDER BY created', ids))
+                if not need_tags:
+                    item_tags.update(load_tags(where, ids))
+                sources.update(load_sources(' WHERE ' + ids_clause('x.item_id', ids), ids))
         for item in page:
+            if not need_tags:
+                item['tags'] = item_tags.get(item['id'], [])
+            item['sources'] = sources.get(item['id'], [])
+            if not need_topics:
+                item["topics"] = json.loads(item["topics"])
+            if not need_preference:
+                item.update(self.preference(item, weights))
+            if sort != 'recommended':
+                item["score"] = score(item)
+            matches = [topic for topic in item['topics'] if weights.get(topic, 0) > 0]
+            item["recommendation"] = "好み（Good／Bad）: " + "、".join(matches) if matches else "好み（Good／Bad）: 一致するGoodの話題はまだありません"
             item['discovery'] = json.loads(discoveries[item['id']]) if item['id'] in discoveries else None
             item['publisher_label'] = publication_label(item)
             if not q:
