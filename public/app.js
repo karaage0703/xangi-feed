@@ -121,9 +121,8 @@ function listTitleLink(item, label) {
     if (!readerEnabled() || event.defaultPrevented || event.button !== 0 ||
         event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
-    void openDetail(item).then(() => {
-      if (detailDialog.open && detailDialog.dataset.id === item.id && control.isConnected) control.focus({preventScroll: true});
-    }).catch(error => notice(error.message));
+    showArticleDetail(item);
+    if (detailDialog.open && detailDialog.dataset.id === item.id) control.focus({preventScroll: true});
   }, {capture: true});
   return control;
 }
@@ -778,7 +777,7 @@ function syncReaderLayout() {
   $('.reading-layout').classList.toggle('reader-enabled', enabled);
   if (detailDialog.open && enabled === detailDialog.matches(':modal')) {
     detailDialog.close();
-    if (detailItem) renderDetail(detailItem);
+    if (detailItem && !$('#detail-body .detail-loading')) renderDetail(detailItem);
     showDetailDialog();
   }
   layoutClassification();
@@ -787,18 +786,57 @@ function syncReaderLayout() {
 async function openDetail(item, target = '') {
   const opening = ++detailOpening;
   const previous = detailDialog.open ? detailDialog.dataset.id : null;
-  const updated = await api(`api/items/${item.id}`);
-  if (opening !== detailOpening) return;
-  Object.assign(item, updated, pendingReactions.get(item.id)?.optimistic || {});
+  const body = $('#detail-body');
+  const preview = !target && item.title && (previous !== item.id || body.querySelector('.detail-loading'));
+  let status;
+  if (preview) {
+    detailItem = item;
+    for (const card of body.querySelectorAll('.link-card')) previewObserver.unobserve(card);
+    detailDialog.dataset.id = item.id;
+    const result = item.analysis?.result;
+    status = el('p', 'detail-loading muted', '詳細を読み込み中…');
+    status.setAttribute('role', 'status');
+    body.replaceChildren(
+      meta(item),
+      el('h2', 'detail-title', result?.title_ja || item.title),
+      el('p', 'excerpt', result?.summary_ja || item.summary || '本文の抜粋はありません。'),
+      status,
+    );
+    if (!detailDialog.open) showDetailDialog();
+    detailDialog.scrollTop = 0;
+    syncReaderSelection();
+  }
+  const obsolete = () => opening !== detailOpening || ((previous || preview) && !detailDialog.open);
+  const initial = {...item};
+  let updated;
+  try {
+    updated = await api(`api/items/${item.id}`);
+  } catch (error) {
+    if (obsolete()) return;
+    if (!status?.isConnected) throw error;
+    status.classList.replace('muted', 'source-error');
+    status.textContent = '詳細を読み込めませんでした。';
+    status.after(button('再試行', () => openDetail(item)));
+    return;
+  }
+  if (obsolete()) return;
+  // Keep local changes made while details were loading, including completed reactions.
+  for (const key of Object.keys(updated)) {
+    if (item[key] === initial[key]) item[key] = updated[key];
+  }
+  Object.assign(item, pendingReactions.get(item.id)?.optimistic);
   renderDetail(item);
   if (!detailDialog.open) showDetailDialog();
-  if (previous !== item.id) detailDialog.scrollTop = 0;
+  if (!preview && previous !== item.id) detailDialog.scrollTop = 0;
   syncReaderSelection();
   if (target === 'tags') { $('#manual-tag-input').scrollIntoView({ block: 'center' }); $('#manual-tag-input').focus({ preventScroll: true }); }
   if (target === 'note') {
     $('#article-note').scrollIntoView({ block: 'center' });
     $('#article-note').focus({ preventScroll: true });
   }
+}
+function showArticleDetail(item) {
+  void openDetail(item).catch(error => notice(error.message));
 }
 
 function ratingIcon(down = false) {
@@ -901,7 +939,7 @@ function actions(item, inDetail = false) {
   }
   group.append(muteControl(item));
   const secondary = el('div', inDetail ? 'detail-actions' : 'action-menu');
-  if (!inDetail) secondary.append(button('記事の詳細', () => openDetail(item)), button('タグを編集', () => openDetail(item, 'tags')));
+  if (!inDetail) secondary.append(button('記事の詳細', () => showArticleDetail(item)), button('タグを編集', () => openDetail(item, 'tags')));
   secondary.append(button('リンクを共有・コピー', () => showArticleLinkOptions(item)));
   const readLabel = item.kind === 'video' ? (item.read ? '未視聴に戻す' : '視聴済みにする') : (item.read ? '未読に戻す' : '読了にする');
   const read = iconButton(`${item.title}を${readLabel}`, () => react(item, { read: !item.read }), icon('read'), 'read-control');
@@ -1070,6 +1108,9 @@ function linkCard(item, thumbnailOnly = false) {
   }
   return card;
 }
+function publisherLabel(item) {
+  return item.publisher_label || item.sources.map(s => s.name).join(' / ') || new URL(item.url).hostname;
+}
 function meta(item) {
   const row = el('div', 'news-top');
   const status = item.kind === 'video' ? (item.read ? '視聴済み' : '未視聴') : (item.read ? '読了' : '未読');
@@ -1077,7 +1118,7 @@ function meta(item) {
   if (item.discovery) row.append(el('span', 'kind', 'おすすめ'));
   if (item.manually_added) row.append(el('span', 'kind', '個別追加'));
   const label = item.updated != null ? '更新' : item.published != null ? '公開' : '取得';
-  const publisher = el('span', 'publisher', item.publisher_label || item.sources.map(s => s.name).join(' / ') || new URL(item.url).hostname);
+  const publisher = el('span', 'publisher', publisherLabel(item));
   row.append(el('span', 'kind', kinds[item.kind]), publisher,
     el('span', '', label + ' ' + date(item.updated ?? item.published ?? item.fetched)), preferenceLabel(item));
   return row;
@@ -1232,11 +1273,15 @@ function renderFeed() {
       if (display === 'summary') {
         const summary = result?.summary_ja || item.summary;
         if (summary) text.append(el('p', 'compact-news-summary', summary));
+        const publisher = publisherLabel(item);
+        const source = el('p', 'compact-news-source', publisher);
+        source.title = publisher;
+        text.append(source);
         article.classList.add('with-summary');
       }
       article.append(text);
       if (display === 'summary') article.append(linkCard(item, true));
-      const detail = iconButton('記事の詳細', () => openDetail(item), icon('more'), 'compact-news-detail');
+      const detail = iconButton('記事の詳細', () => showArticleDetail(item), icon('more'), 'compact-news-detail');
       detail.setAttribute('aria-haspopup', 'dialog');
       article.append(detail);
       feed.append(article);
@@ -1834,6 +1879,8 @@ async function refreshAnalyses() {
       if (item?.id === $('#detail').dataset.id) {
         item.analysis = analysis;
         body.querySelector('.detail-title').textContent = analysis?.result?.title_ja || item.title;
+        const excerpt = body.querySelector('.detail-loading') && body.querySelector('.excerpt');
+        if (excerpt) excerpt.textContent = analysis?.result?.summary_ja || item.summary || '本文の抜粋はありません。';
         replaceEditorial(body, item);
       }
     }
